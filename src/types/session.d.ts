@@ -36,6 +36,7 @@ export interface SessionJoinVO {
   sessionKey: string
   name: string
   currentVersion: number
+  // 初次加入会话时返回的全量图形数据。
   graphics: GraphicVO[]
 }
 
