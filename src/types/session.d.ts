@@ -1,3 +1,5 @@
+import type { GraphicVO } from '@/types/graphic'
+
 export type SessionStatus = 0 | 1
 
 export interface MemberVO {
@@ -20,10 +22,6 @@ export interface SessionVO {
   memberCount?: number
   currentVersion?: number
   createdAt: string
-}
-
-export interface GraphicVO {
-  [key: string]: unknown
 }
 
 // 会话详情在基础字段上补充成员信息。
