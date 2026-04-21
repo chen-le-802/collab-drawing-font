@@ -11,6 +11,19 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/my-sessions',
+      name: 'my-sessions',
+      // 当前阶段复用 Home，会话筛选逻辑后续再按业务拆分。
+      component: () => import('@/views/Home.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
+      path: '/session/:sessionKey',
+      name: 'session',
+      component: () => import('@/views/DrawCanvas.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/login',
       name: 'login',
       component: () => import('@/views/Login.vue'),

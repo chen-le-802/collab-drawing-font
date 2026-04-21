@@ -1,0 +1,189 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+import type { SessionVO } from '@/types/session'
+
+const props = withDefaults(
+  defineProps<{
+    session: SessionVO
+    isCreator?: boolean
+  }>(),
+  {
+    isCreator: false,
+  },
+)
+
+const emit = defineEmits<{
+  open: [session: SessionVO]
+  copy: [session: SessionVO]
+  delete: [session: SessionVO]
+  leave: [session: SessionVO]
+}>()
+
+// 将后端状态值映射为界面标签，避免模板里出现重复判断。
+const statusType = computed(() => (props.session.status === 1 ? 'success' : 'info'))
+const statusText = computed(() => (props.session.status === 1 ? '进行中' : '已结束'))
+
+// 列表接口仅返回 memberCount，这里渲染占位头像组。
+const memberCount = computed(() => props.session.memberCount ?? 0)
+const displayMemberSlots = computed(() =>
+  Array.from({ length: Math.min(memberCount.value, 4) }, (_, index) => index),
+)
+const extraMembers = computed(() => Math.max(memberCount.value - 4, 0))
+
+const formattedTime = computed(() => {
+  const time = new Date(props.session.createdAt)
+  if (Number.isNaN(time.getTime())) {
+    return props.session.createdAt
+  }
+  return time.toLocaleString()
+})
+
+// 组件只负责事件分发，具体业务逻辑交由父组件处理。
+const handleOpen = () => emit('open', props.session)
+const handleCopy = () => emit('copy', props.session)
+const handleDelete = () => emit('delete', props.session)
+const handleLeave = () => emit('leave', props.session)
+</script>
+
+<template>
+  <el-card class="session-card" shadow="hover" @click="handleOpen">
+    <div class="thumbnail">
+      <img v-if="session.thumbnail" :src="session.thumbnail" alt="session-thumbnail" />
+      <div v-else class="thumbnail-placeholder">
+        <span>画布缩略图</span>
+      </div>
+    </div>
+
+    <div class="content">
+      <div class="top-row">
+        <h3 class="name" :title="session.name">{{ session.name }}</h3>
+        <el-tag size="small" :type="statusType">{{ statusText }}</el-tag>
+      </div>
+
+      <div class="meta-row">
+        <template v-if="displayMemberSlots.length > 0">
+          <el-avatar-group :max="4">
+            <el-avatar v-for="slot in displayMemberSlots" :key="slot" :size="26">
+              {{ slot + 1 }}
+            </el-avatar>
+          </el-avatar-group>
+          <span v-if="extraMembers > 0" class="extra-members">+{{ extraMembers }}</span>
+        </template>
+        <span v-else class="member-count">成员 {{ memberCount }}</span>
+      </div>
+
+      <div class="time">{{ formattedTime }}</div>
+    </div>
+
+    <div class="actions" @click.stop>
+      <el-button size="small" text type="primary" @click="handleCopy">复制链接</el-button>
+      <el-button v-if="props.isCreator" size="small" text type="danger" @click="handleDelete">
+        删除
+      </el-button>
+      <el-button v-else size="small" text type="warning" @click="handleLeave">退出会话</el-button>
+    </div>
+  </el-card>
+</template>
+
+<style scoped>
+.session-card {
+  width: 280px;
+  height: 200px;
+  border-radius: 8px;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+:deep(.session-card .el-card__body) {
+  height: 100%;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.thumbnail {
+  height: 92px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #eef3ff;
+}
+
+.thumbnail img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumbnail-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #7f8ea3;
+  background: linear-gradient(120deg, #dfe8ff 0%, #edf2ff 100%);
+  font-size: 13px;
+}
+
+.content {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.name {
+  margin: 0;
+  font-size: 15px;
+  color: #1f2d3d;
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.meta-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.extra-members {
+  color: #7f8ea3;
+  font-size: 12px;
+}
+
+.member-count {
+  color: #7f8ea3;
+  font-size: 12px;
+}
+
+.time {
+  color: #909399;
+  font-size: 12px;
+}
+
+.actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.session-card:hover .actions {
+  opacity: 1;
+}
+</style>
