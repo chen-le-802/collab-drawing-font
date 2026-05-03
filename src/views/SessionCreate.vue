@@ -31,7 +31,7 @@ const form = reactive({
 const rules: FormRules = {
   name: [
     { required: true, message: '请输入会话名称', trigger: 'blur' },
-    { min: 2, max: 30, message: '会话名称长度在 2 到 30 个字符', trigger: 'blur' },
+    { min: 1, max: 100, message: '会话名称长度在 1 到 100 个字符', trigger: 'blur' },
   ],
 }
 
@@ -81,7 +81,7 @@ const handleConfirm = async () => {
         <el-input
           v-model="form.name"
           placeholder="请输入会话名称"
-          maxlength="30"
+          maxlength="100"
           show-word-limit
           @keyup.enter="handleConfirm"
         />

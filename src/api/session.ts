@@ -18,10 +18,12 @@ export interface SessionAPI {
     creatorId?: number,
   ): Promise<SessionListVO>
   listMyCreated(page?: number, pageSize?: number, creatorId?: number): Promise<SessionListVO>
-  getDetail(sessionKey: string): Promise<SessionDetailVO>
+  getDetail(sessionKey: string, includeHistory?: boolean): Promise<SessionDetailVO>
   join(sessionKey: string): Promise<SessionJoinVO>
   heartbeat(sessionKey: string): Promise<void>
   leave(sessionKey: string): Promise<void>
+  removeMember(sessionKey: string, targetUserId: number): Promise<void>
+  transferCreator(sessionKey: string, targetUserId: number): Promise<void>
   deleteSession(sessionKey: string): Promise<void>
 }
 
@@ -57,9 +59,11 @@ export const sessionApi: SessionAPI = {
     return sessionApi.list(page, pageSize, undefined, creatorId)
   },
 
-  async getDetail(sessionKey: string): Promise<SessionDetailVO> {
+  async getDetail(sessionKey: string, includeHistory = false): Promise<SessionDetailVO> {
     // 对齐后端：GET /api/v1/sessions/:sessionKey
-    const res = await http.get<ApiResponse<SessionDetailVO>>(`v1/sessions/${sessionKey}`)
+    const res = await http.get<ApiResponse<SessionDetailVO>>(`v1/sessions/${sessionKey}`, {
+      params: { includeHistory: includeHistory ? 1 : 0 },
+    })
     if (res.data.code !== ErrorCode.SUCCESS) {
       handleApiError(res.data.code, res.data.message)
     }
@@ -90,6 +94,20 @@ export const sessionApi: SessionAPI = {
       handleApiError(res.data.code, res.data.message)
     }
     // 该接口成功时无业务数据，调用侧只关心是否抛错。
+  },
+
+  async removeMember(sessionKey: string, targetUserId: number): Promise<void> {
+    const res = await http.post<ApiResponse<null>>(`v1/sessions/${sessionKey}/members/${targetUserId}/remove`)
+    if (res.data.code !== ErrorCode.SUCCESS) {
+      handleApiError(res.data.code, res.data.message)
+    }
+  },
+
+  async transferCreator(sessionKey: string, targetUserId: number): Promise<void> {
+    const res = await http.post<ApiResponse<null>>(`v1/sessions/${sessionKey}/transfer/${targetUserId}`)
+    if (res.data.code !== ErrorCode.SUCCESS) {
+      handleApiError(res.data.code, res.data.message)
+    }
   },
 
   async deleteSession(sessionKey: string): Promise<void> {

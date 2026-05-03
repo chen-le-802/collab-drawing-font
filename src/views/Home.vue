@@ -116,13 +116,26 @@ const handleDeleteSession = (_session: SessionVO) => {
 }
 
 const handleLeaveSession = async (session: SessionVO) => {
-  try {
-    await sessionApi.leave(session.sessionKey)
-    sessions.value = sessions.value.filter((item) => item.sessionKey !== session.sessionKey)
-    ElMessage.success('已退出会话')
-  } catch (error: any) {
-    ElMessage.error(error.message || '退出会话失败')
-  }
+  ElMessageBox.confirm(
+    '退出后将从“我加入的会话”中移除，但你仍可通过邀请链接再次加入。是否继续？',
+    '退出会话确认',
+    {
+      type: 'warning',
+      confirmButtonText: '确认退出',
+      cancelButtonText: '取消',
+    },
+  )
+    .then(async () => {
+      await sessionApi.leave(session.sessionKey)
+      sessions.value = sessions.value.filter((item) => item.sessionKey !== session.sessionKey)
+      ElMessage.success('已退出会话，可通过邀请链接再次加入')
+    })
+    .catch((error: unknown) => {
+      if (error === 'cancel' || error === 'close') {
+        return
+      }
+      ElMessage.error((error as Error)?.message || '退出会话失败')
+    })
 }
 
 const isSessionCreator = (session: SessionVO): boolean => {

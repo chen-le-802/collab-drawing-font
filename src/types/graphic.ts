@@ -3,6 +3,7 @@ export type GraphicObjectType = 'line' | 'rect' | 'circle' | 'text'
 // 与后端 graphic_objects 表一一对应的前端实体。
 export interface GraphicVO {
   id: number
+  sessionId: number
   objectKey: string
   objectType: GraphicObjectType
   // 位置语义：
@@ -11,17 +12,16 @@ export interface GraphicVO {
   positionY: number
   // 尺寸语义：
   // line: 终点相对偏移；rect: 宽高；circle: 直径；text: 文本区域大小。
-  width?: number
-  height?: number
+  width: number | null
+  height: number | null
   strokeColor: string
-  fillColor?: string
+  fillColor: string | null
   strokeWidth: number
-  textContent?: string
-  fontSize?: number
+  textContent: string | null
+  fontSize: number | null
   zIndex: number
   version: number
   creatorId: number
-  isDeleted: number
   createdAt: string
   updatedAt: string
 }

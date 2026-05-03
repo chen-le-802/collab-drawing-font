@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import type { UploadProps } from 'element-plus'
@@ -22,7 +22,9 @@ const form = reactive({
 })
 
 const localAvatarPreview = ref('')
-const uploadAvatarAction = 'http://localhost:3000/api/v1/users/avatar'
+const previewObjectUrl = ref('')
+const getApiBaseUrl = () => import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000/api/'
+const uploadAvatarAction = `${getApiBaseUrl().replace(/\/$/, '')}/v1/users/avatar`
 const uploadAvatarHeaders = computed(() => {
   const token = storage.getToken()
   return token ? { Authorization: `Bearer ${token}` } : {}
@@ -56,7 +58,12 @@ const hydrateForm = (user: UserVO) => {
 }
 
 const handleAvatarSuccess: UploadProps['onSuccess'] = (response, uploadFile) => {
-  localAvatarPreview.value = URL.createObjectURL(uploadFile.raw!)
+  if (previewObjectUrl.value) {
+    URL.revokeObjectURL(previewObjectUrl.value)
+    previewObjectUrl.value = ''
+  }
+  previewObjectUrl.value = URL.createObjectURL(uploadFile.raw!)
+  localAvatarPreview.value = previewObjectUrl.value
   const avatarUrl =
     typeof response === 'string'
       ? response
@@ -134,6 +141,13 @@ const handleSave = async () => {
 
 onMounted(() => {
   fetchProfile()
+})
+
+onBeforeUnmount(() => {
+  if (previewObjectUrl.value) {
+    URL.revokeObjectURL(previewObjectUrl.value)
+    previewObjectUrl.value = ''
+  }
 })
 </script>
 
