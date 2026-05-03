@@ -20,6 +20,7 @@ export interface SessionAPI {
   listMyCreated(page?: number, pageSize?: number, creatorId?: number): Promise<SessionListVO>
   getDetail(sessionKey: string): Promise<SessionDetailVO>
   join(sessionKey: string): Promise<SessionJoinVO>
+  heartbeat(sessionKey: string): Promise<void>
   leave(sessionKey: string): Promise<void>
   deleteSession(sessionKey: string): Promise<void>
 }
@@ -72,6 +73,14 @@ export const sessionApi: SessionAPI = {
       handleApiError(res.data.code, res.data.message)
     }
     return res.data.data!
+  },
+
+  async heartbeat(sessionKey: string): Promise<void> {
+    // 对齐后端：POST /api/v1/sessions/:sessionKey/heartbeat
+    const res = await http.post<ApiResponse<null>>(`v1/sessions/${sessionKey}/heartbeat`)
+    if (res.data.code !== ErrorCode.SUCCESS) {
+      handleApiError(res.data.code, res.data.message)
+    }
   },
 
   async leave(sessionKey: string): Promise<void> {

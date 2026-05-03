@@ -31,6 +31,7 @@ const displayMembers = computed(() => {
     return previews.slice(0, 4).map((member) => ({
       userId: member.userId,
       avatar: member.avatar,
+      isOnline: member.isOnline,
       fallbackText: (member.username || '?').slice(0, 1).toUpperCase(),
     }))
   }
@@ -38,10 +39,12 @@ const displayMembers = computed(() => {
   return Array.from({ length: Math.min(memberCount.value, 4) }, (_, index) => ({
     userId: index + 1,
     avatar: '',
+    isOnline: false,
     fallbackText: String(index + 1),
   }))
 })
 const extraMembers = computed(() => Math.max(memberCount.value - 4, 0))
+const onlineMemberCount = computed(() => props.session.onlineMemberCount ?? 0)
 
 const formattedTime = computed(() => {
   const time = new Date(props.session.createdAt)
@@ -61,8 +64,7 @@ const handleLeave = () => emit('leave', props.session)
 <template>
   <el-card class="session-card" shadow="hover" @click="handleOpen">
     <div class="thumbnail">
-      <img v-if="session.thumbnail" :src="session.thumbnail" alt="session-thumbnail" />
-      <div v-else class="thumbnail-placeholder">
+      <div class="thumbnail-placeholder">
         <span>画布缩略图</span>
       </div>
     </div>
@@ -73,10 +75,22 @@ const handleLeave = () => emit('leave', props.session)
         <el-tag size="small" :type="statusType">{{ statusText }}</el-tag>
       </div>
 
+      <div class="creator" :title="session.creatorName || '未知创建者'">
+        创建者：{{ session.creatorName || '未知' }}
+      </div>
+
       <div class="meta-row">
         <template v-if="displayMembers.length > 0">
           <el-avatar-group :max="4">
-            <el-avatar v-for="member in displayMembers" :key="member.userId" :size="26" :src="member.avatar">
+            <el-avatar
+              v-for="member in displayMembers"
+              :key="member.userId"
+              :size="26"
+              :src="member.avatar"
+              class="member-avatar"
+              :class="{ 'avatar-online': member.isOnline }"
+              :title="member.isOnline ? '在线' : '离线'"
+            >
               {{ member.fallbackText }}
             </el-avatar>
           </el-avatar-group>
@@ -84,6 +98,8 @@ const handleLeave = () => emit('leave', props.session)
         </template>
         <span v-else class="member-count">成员 {{ memberCount }}</span>
       </div>
+
+      <div class="online-count">在线 {{ onlineMemberCount }} / 成员 {{ memberCount }}</div>
 
       <div class="time">{{ formattedTime }}</div>
     </div>
@@ -169,6 +185,14 @@ const handleLeave = () => emit('leave', props.session)
   gap: 6px;
 }
 
+.creator {
+  color: #7f8ea3;
+  font-size: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .extra-members {
   color: #7f8ea3;
   font-size: 12px;
@@ -179,8 +203,23 @@ const handleLeave = () => emit('leave', props.session)
   font-size: 12px;
 }
 
+.member-avatar {
+  box-sizing: border-box;
+  border: 2px solid transparent;
+}
+
+.member-avatar.avatar-online {
+  border-color: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.18);
+}
+
 .time {
   color: #909399;
+  font-size: 12px;
+}
+
+.online-count {
+  color: #5f6f85;
   font-size: 12px;
 }
 

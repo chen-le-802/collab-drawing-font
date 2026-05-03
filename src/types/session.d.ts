@@ -5,6 +5,7 @@ export type SessionStatus = 0 | 1
 export interface MemberVO {
   userId: number
   username: string
+  avatar?: string
   role: number
   onlineStatus: number
   joinedAt: string
@@ -14,6 +15,7 @@ export interface SessionMemberPreviewVO {
   userId: number
   username: string
   avatar?: string
+  isOnline: boolean
 }
 
 // 会话列表卡片使用的数据结构。
@@ -26,6 +28,7 @@ export interface SessionVO {
   creatorId: number
   creatorName?: string
   memberCount?: number
+  onlineMemberCount?: number
   memberPreviews?: SessionMemberPreviewVO[]
   currentVersion?: number
   createdAt: string
