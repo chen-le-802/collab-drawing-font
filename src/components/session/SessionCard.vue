@@ -23,11 +23,24 @@ const emit = defineEmits<{
 const statusType = computed(() => (props.session.status === 1 ? 'success' : 'info'))
 const statusText = computed(() => (props.session.status === 1 ? '进行中' : '已结束'))
 
-// 列表接口仅返回 memberCount，这里渲染占位头像组。
+// 列表接口优先返回成员头像预览；缺失时回退占位头像。
 const memberCount = computed(() => props.session.memberCount ?? 0)
-const displayMemberSlots = computed(() =>
-  Array.from({ length: Math.min(memberCount.value, 4) }, (_, index) => index),
-)
+const displayMembers = computed(() => {
+  const previews = props.session.memberPreviews ?? []
+  if (previews.length > 0) {
+    return previews.slice(0, 4).map((member) => ({
+      userId: member.userId,
+      avatar: member.avatar,
+      fallbackText: (member.username || '?').slice(0, 1).toUpperCase(),
+    }))
+  }
+
+  return Array.from({ length: Math.min(memberCount.value, 4) }, (_, index) => ({
+    userId: index + 1,
+    avatar: '',
+    fallbackText: String(index + 1),
+  }))
+})
 const extraMembers = computed(() => Math.max(memberCount.value - 4, 0))
 
 const formattedTime = computed(() => {
@@ -61,10 +74,10 @@ const handleLeave = () => emit('leave', props.session)
       </div>
 
       <div class="meta-row">
-        <template v-if="displayMemberSlots.length > 0">
+        <template v-if="displayMembers.length > 0">
           <el-avatar-group :max="4">
-            <el-avatar v-for="slot in displayMemberSlots" :key="slot" :size="26">
-              {{ slot + 1 }}
+            <el-avatar v-for="member in displayMembers" :key="member.userId" :size="26" :src="member.avatar">
+              {{ member.fallbackText }}
             </el-avatar>
           </el-avatar-group>
           <span v-if="extraMembers > 0" class="extra-members">+{{ extraMembers }}</span>

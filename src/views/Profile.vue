@@ -2,10 +2,13 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
+import type { UploadProps } from 'element-plus'
+import { Plus } from '@element-plus/icons-vue'
 import AppHeader from '@/components/layout/AppHeader.vue'
 import { userApi } from '@/api/user'
 import { useAuthStore } from '@/stores/auth'
 import type { UpdateProfileDTO, UserVO } from '@/types/user'
+import { storage } from '@/utils/storage'
 
 const authStore = useAuthStore()
 const loading = ref(false)
@@ -16,6 +19,13 @@ const currentUser = ref<UserVO | null>(null)
 const form = reactive({
   username: '',
   avatar: '',
+})
+
+const localAvatarPreview = ref('')
+const uploadAvatarAction = 'http://localhost:3000/api/v1/users/avatar'
+const uploadAvatarHeaders = computed(() => {
+  const token = storage.getToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
 })
 
 const registerTimeText = computed(() => {
@@ -29,43 +39,47 @@ const registerTimeText = computed(() => {
   return date.toLocaleString('zh-CN', { hour12: false })
 })
 
-const avatarPreview = computed(() => form.avatar || currentUser.value?.avatar || '')
-
-const validateAvatar = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
-  if (!value) {
-    callback()
-    return
-  }
-
-  if (value.length > 500) {
-    callback(new Error('头像地址长度不能超过 500'))
-    return
-  }
-
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      callback(new Error('头像地址必须为 http/https URL'))
-      return
-    }
-    callback()
-  } catch {
-    callback(new Error('请输入合法的 URL'))
-  }
-}
+const avatarPreview = computed(() => localAvatarPreview.value || form.avatar || currentUser.value?.avatar || '')
 
 const rules: FormRules = {
   username: [
     { required: true, message: '请输入用户名', trigger: 'blur' },
     { min: 4, max: 20, message: '用户名长度在 4 到 20 个字符', trigger: 'blur' },
   ],
-  avatar: [{ validator: validateAvatar, trigger: 'blur' }],
 }
 
 const hydrateForm = (user: UserVO) => {
   currentUser.value = user
   form.username = user.username
   form.avatar = user.avatar ?? ''
+  localAvatarPreview.value = ''
+}
+
+const handleAvatarSuccess: UploadProps['onSuccess'] = (response, uploadFile) => {
+  localAvatarPreview.value = URL.createObjectURL(uploadFile.raw!)
+  const avatarUrl =
+    typeof response === 'string'
+      ? response
+      : (response as { data?: { url?: unknown }; url?: unknown })?.data?.url ??
+        (response as { data?: { url?: unknown }; url?: unknown })?.url
+  if (typeof avatarUrl === 'string' && avatarUrl.trim()) {
+    form.avatar = avatarUrl.trim()
+    return
+  }
+  ElMessage.error('头像上传响应异常，请重试')
+}
+
+const beforeAvatarUpload: UploadProps['beforeUpload'] = (rawFile) => {
+  const allowedTypes = new Set(['image/jpeg', 'image/png', 'image/webp'])
+  if (!allowedTypes.has(rawFile.type)) {
+    ElMessage.error('头像图片仅支持 JPG/JPEG、PNG、WEBP 格式')
+    return false
+  }
+  if (rawFile.size / 1024 / 1024 > 2) {
+    ElMessage.error('头像图片大小不能超过 2MB')
+    return false
+  }
+  return true
 }
 
 const fetchProfile = async () => {
@@ -146,8 +160,21 @@ onMounted(() => {
             <el-input v-model="form.username" maxlength="20" show-word-limit />
           </el-form-item>
 
-          <el-form-item label="头像 URL" prop="avatar">
-            <el-input v-model="form.avatar" placeholder="https://example.com/avatar.png" maxlength="500" show-word-limit />
+          <el-form-item label="上传头像">
+            <el-upload
+              class="avatar-uploader"
+              :action="uploadAvatarAction"
+              :headers="uploadAvatarHeaders"
+              accept="image/jpeg,image/png,image/webp"
+              name="file"
+              :show-file-list="false"
+              :on-success="handleAvatarSuccess"
+              :before-upload="beforeAvatarUpload"
+            >
+              <img v-if="avatarPreview" :src="avatarPreview" class="avatar" />
+              <el-icon v-else class="avatar-uploader-icon"><Plus /></el-icon>
+            </el-upload>
+            <div class="upload-tip">支持 JPG/JPEG、PNG、WEBP 格式，且文件大小不超过 2MB</div>
           </el-form-item>
 
           <el-form-item>
@@ -208,6 +235,20 @@ onMounted(() => {
   margin-top: 8px;
 }
 
+.avatar-uploader .avatar {
+  width: 178px;
+  height: 178px;
+  display: block;
+  object-fit: cover;
+}
+
+.upload-tip {
+  margin-top: 8px;
+  color: #7b8797;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 @media (max-width: 900px) {
   .profile-content {
     padding: 16px;
@@ -217,5 +258,29 @@ onMounted(() => {
     align-items: flex-start;
     flex-direction: column;
   }
+}
+</style>
+
+<style>
+.avatar-uploader .el-upload {
+  border: 1px dashed var(--el-border-color);
+  border-radius: 6px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: var(--el-transition-duration-fast);
+}
+
+.avatar-uploader .el-upload:hover {
+  border-color: var(--el-color-primary);
+}
+
+.avatar-uploader-icon {
+  font-size: 28px;
+  color: #8c939d;
+  width: 178px;
+  height: 178px;
+  text-align: center;
+  line-height: 178px;
 }
 </style>

@@ -10,6 +10,12 @@ export interface MemberVO {
   joinedAt: string
 }
 
+export interface SessionMemberPreviewVO {
+  userId: number
+  username: string
+  avatar?: string
+}
+
 // 会话列表卡片使用的数据结构。
 export interface SessionVO {
   sessionId: number
@@ -20,6 +26,7 @@ export interface SessionVO {
   creatorId: number
   creatorName?: string
   memberCount?: number
+  memberPreviews?: SessionMemberPreviewVO[]
   currentVersion?: number
   createdAt: string
 }
