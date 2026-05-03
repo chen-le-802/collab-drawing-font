@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { userApi } from '@/api/user'
 
@@ -36,7 +35,7 @@ const handleMenuSelect = (index: string) => {
 
 const handleCommand = async (command: string) => {
   if (command === 'profile') {
-    ElMessage.info('个人中心功能开发中')
+    router.push('/profile')
     return
   }
 
@@ -71,7 +70,7 @@ const handleCommand = async (command: string) => {
 
     <el-dropdown trigger="click" @command="handleCommand">
       <div class="user-trigger">
-        <el-avatar :size="36" class="user-avatar">
+        <el-avatar :size="36" :src="authStore.user?.avatar" class="user-avatar">
           {{ avatarText }}
         </el-avatar>
       </div>

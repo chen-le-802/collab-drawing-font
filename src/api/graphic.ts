@@ -25,7 +25,7 @@ export interface GraphicAPI {
 export const graphicApi: GraphicAPI = {
   async getGraphics(sessionKey: string, sinceVersion?: number) {
     // 对齐后端：GET /api/v1/sessions/:sessionKey/graphics?sinceVersion=
-    const res = await http.get<ApiResponse<GraphicsResponseVO>>(`/v1/sessions/${sessionKey}/graphics`, {
+    const res = await http.get<ApiResponse<GraphicsResponseVO>>(`v1/sessions/${sessionKey}/graphics`, {
       params: { sinceVersion },
     })
 

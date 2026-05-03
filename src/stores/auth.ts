@@ -13,7 +13,15 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   const setUser = (newUser: UserVO) => {
-    user.value = newUser
+    user.value = {
+      userId: newUser.userId,
+      username: newUser.username,
+      ...(newUser.avatar ? { avatar: newUser.avatar } : {}),
+      ...(newUser.role !== undefined ? { role: newUser.role } : {}),
+      ...(newUser.status !== undefined ? { status: newUser.status } : {}),
+      ...(newUser.createdAt ? { createdAt: newUser.createdAt } : {}),
+      ...(newUser.updatedAt ? { updatedAt: newUser.updatedAt } : {}),
+    }
   }
 
   const logout = () => {

@@ -27,7 +27,7 @@ export interface SessionAPI {
 export const sessionApi: SessionAPI = {
   async create(name: string): Promise<SessionVO> {
     // 对齐后端：POST /api/v1/sessions
-    const res = await http.post<ApiResponse<SessionVO>>('/v1/sessions', { name })
+    const res = await http.post<ApiResponse<SessionVO>>('v1/sessions', { name })
     if (res.data.code !== ErrorCode.SUCCESS) {
       handleApiError(res.data.code, res.data.message)
     }
@@ -41,7 +41,7 @@ export const sessionApi: SessionAPI = {
     creatorId?: number,
   ): Promise<SessionListVO> {
     // 对齐后端：GET /api/v1/sessions?page=&pageSize=&status=&creatorId=
-    const res = await http.get<ApiResponse<SessionListVO>>('/v1/sessions', {
+    const res = await http.get<ApiResponse<SessionListVO>>('v1/sessions', {
       params: { page, pageSize, status, creatorId },
     })
     if (res.data.code !== ErrorCode.SUCCESS) {
@@ -58,7 +58,7 @@ export const sessionApi: SessionAPI = {
 
   async getDetail(sessionKey: string): Promise<SessionDetailVO> {
     // 对齐后端：GET /api/v1/sessions/:sessionKey
-    const res = await http.get<ApiResponse<SessionDetailVO>>(`/v1/sessions/${sessionKey}`)
+    const res = await http.get<ApiResponse<SessionDetailVO>>(`v1/sessions/${sessionKey}`)
     if (res.data.code !== ErrorCode.SUCCESS) {
       handleApiError(res.data.code, res.data.message)
     }
@@ -67,7 +67,7 @@ export const sessionApi: SessionAPI = {
 
   async join(sessionKey: string): Promise<SessionJoinVO> {
     // 对齐后端：POST /api/v1/sessions/:sessionKey/join
-    const res = await http.post<ApiResponse<SessionJoinVO>>(`/v1/sessions/${sessionKey}/join`)
+    const res = await http.post<ApiResponse<SessionJoinVO>>(`v1/sessions/${sessionKey}/join`)
     if (res.data.code !== ErrorCode.SUCCESS) {
       handleApiError(res.data.code, res.data.message)
     }
@@ -76,7 +76,7 @@ export const sessionApi: SessionAPI = {
 
   async leave(sessionKey: string): Promise<void> {
     // 对齐后端：POST /api/v1/sessions/:sessionKey/leave
-    const res = await http.post<ApiResponse<null>>(`/v1/sessions/${sessionKey}/leave`)
+    const res = await http.post<ApiResponse<null>>(`v1/sessions/${sessionKey}/leave`)
     if (res.data.code !== ErrorCode.SUCCESS) {
       handleApiError(res.data.code, res.data.message)
     }
@@ -85,7 +85,7 @@ export const sessionApi: SessionAPI = {
 
   async deleteSession(sessionKey: string): Promise<void> {
     // 对齐后端：DELETE /api/v1/sessions/:sessionKey
-    const res = await http.delete<ApiResponse<null>>(`/v1/sessions/${sessionKey}`)
+    const res = await http.delete<ApiResponse<null>>(`v1/sessions/${sessionKey}`)
     if (res.data.code !== ErrorCode.SUCCESS) {
       handleApiError(res.data.code, res.data.message)
     }

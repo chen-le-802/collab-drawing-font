@@ -33,4 +33,7 @@ declare module 'vue' {
     RouterView: typeof import('vue-router')['RouterView']
     SessionCard: typeof import('./src/components/session/SessionCard.vue')['default']
   }
+  export interface GlobalDirectives {
+    vLoading: typeof import('element-plus/es')['ElLoadingDirective']
+  }
 }
