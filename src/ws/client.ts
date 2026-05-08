@@ -65,6 +65,17 @@ const toString = (value: unknown, fallback = ''): string => {
   return typeof value === 'string' ? value : fallback
 }
 
+const toPathPoints = (value: unknown): Array<{ x: number; y: number }> | null => {
+  if (!Array.isArray(value)) {
+    return null
+  }
+  const points = value
+    .filter(isObject)
+    .map((item) => ({ x: toNumber(item.x), y: toNumber(item.y) }))
+    .filter((item) => Number.isFinite(item.x) && Number.isFinite(item.y))
+  return points.length > 0 ? points : null
+}
+
 const toMemberArray = (value: unknown): MemberVO[] => {
   if (!Array.isArray(value)) {
     return []
@@ -104,6 +115,7 @@ const toGraphic = (value: unknown): GraphicVO | null => {
     strokeWidth: toNumber(value.strokeWidth),
     textContent: typeof value.textContent === 'string' ? value.textContent : null,
     fontSize: typeof value.fontSize === 'number' ? value.fontSize : null,
+    pathPoints: toPathPoints(value.pathPoints),
     zIndex: toNumber(value.zIndex),
     version: toNumber(value.version),
     creatorId: toNumber(value.creatorId),
@@ -509,6 +521,8 @@ export class WebSocketClient {
     const record = isObject(data) ? data : {}
     return {
       sessionKey: toString(record.sessionKey, this.sessionKey),
+      success: typeof record.success === 'boolean' ? record.success : true,
+      operation: isObject(record.operation) ? (record.operation as unknown) : undefined,
       operationId: toNumber(record.operationId),
       undoOperationId: toNumber(record.undoOperationId),
       canUndo: !!record.canUndo,
@@ -520,6 +534,8 @@ export class WebSocketClient {
     const record = isObject(data) ? data : {}
     return {
       sessionKey: toString(record.sessionKey, this.sessionKey),
+      success: typeof record.success === 'boolean' ? record.success : true,
+      operation: isObject(record.operation) ? (record.operation as unknown) : undefined,
       operationId: toNumber(record.operationId),
       redoOperationId: toNumber(record.redoOperationId),
       canUndo: !!record.canUndo,
@@ -552,6 +568,7 @@ export class WebSocketClient {
       strokeWidth: toNumber(source.strokeWidth, 1),
       textContent: typeof source.textContent === 'string' ? source.textContent : null,
       fontSize: typeof source.fontSize === 'number' ? source.fontSize : null,
+      pathPoints: toPathPoints(source.pathPoints),
       zIndex: toNumber(source.zIndex),
       version: toNumber(source.version),
       creatorId: toNumber(source.creatorId),

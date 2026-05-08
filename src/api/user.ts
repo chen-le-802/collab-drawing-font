@@ -70,6 +70,7 @@ export interface UserAPI {
   logout(): Promise<void>
   getMe(): Promise<UserVO>
   updateProfile(data: { username?: string; avatar?: string }): Promise<UserVO>
+  changePassword(currentPassword: string, newPassword: string): Promise<void>
 }
 
 export const userApi: UserAPI = {
@@ -139,5 +140,19 @@ export const userApi: UserAPI = {
       handleApiError(res.code, res.message)
     }
     return normalizeUser(res.data!)
+  },
+
+  changePassword: async (currentPassword: string, newPassword: string): Promise<void> => {
+    const res = await requestUserWithCompat<null>({
+      method: 'post',
+      path: '/change-password',
+      data: {
+        currentPassword,
+        newPassword,
+      },
+    })
+    if (res.code !== ErrorCode.SUCCESS) {
+      handleApiError(res.code, res.message)
+    }
   },
 }

@@ -1,28 +1,91 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import AppHeader from '@/components/layout/AppHeader.vue'
-import type { MemberVO, SessionDetailVO, SessionJoinVO } from '@/types/session'
+
+import MemberPanel from '@/components/sidebar/MemberPanel.vue'
+import StatusBar from '@/components/statusbar/StatusBar.vue'
+import ToolBar, { type CanvasTool } from '@/components/toolbar/ToolBar.vue'
+import TopBar from '@/components/toolbar/TopBar.vue'
+import { graphicApi } from '@/api/graphic'
+import { sessionApi } from '@/api/session'
 import { userApi } from '@/api/user'
+import { useAuthStore } from '@/stores/auth'
+import { useCanvasStore } from '@/stores/canvas'
+import { generateGraphicObjectKey, type GraphicVO } from '@/types/graphic'
+import type { MemberVO, SessionDetailVO, SessionJoinVO } from '@/types/session'
+import { storage } from '@/utils/storage'
+import { confirmDanger, feedback } from '@/utils/feedback'
 import WebSocketClient from '@/ws/client'
 import type {
   ConnectedEventData,
   DisconnectedEventData,
+  GraphicCreatedData,
+  GraphicDeletedData,
+  GraphicUpdatedData,
   MemberJoinedData,
+  MemberStatusChangedData,
+  OperationVO,
   ReconnectFailedEventData,
   ReconnectingEventData,
   SessionJoinedData,
   SessionLeftData,
   WsErrorData,
 } from '@/ws/types'
-import { sessionApi } from '@/api/session'
-import { useAuthStore } from '@/stores/auth'
-import { storage } from '@/utils/storage'
+
+type Point = { x: number; y: number }
+
+interface DraftGraphic {
+  active: boolean
+  start: Point
+  end: Point
+  points: Point[]
+}
+
+interface DragMove {
+  active: boolean
+  objectKey: string
+  start: Point
+  baseX: number
+  baseY: number
+  basePathPoints: Point[] | null
+  originalGraphic: GraphicVO | null
+}
+
+type ResizeHandleKey = 'nw' | 'ne' | 'sw' | 'se'
+
+interface ResizeState {
+  active: boolean
+  objectKey: string
+  handle: ResizeHandleKey | null
+  originalGraphic: GraphicVO | null
+}
+
+interface PanState {
+  active: boolean
+  start: Point
+  originOffset: Point
+}
+
+type OperationHistorySource = 'local' | 'remote' | 'system'
+
+interface OperationHistoryItem {
+  id: string
+  operationType: OperationVO['operationType'] | 'undo' | 'redo'
+  objectKey: string
+  userId: number | null
+  userLabel: string
+  source: OperationHistorySource
+  timestamp: number
+  timeText: string
+}
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
+const canvasStore = useCanvasStore()
+
+const canvasRef = ref<HTMLCanvasElement | null>(null)
+const canvasContainerRef = ref<HTMLDivElement | null>(null)
 
 const joining = ref(false)
 const joined = ref(false)
@@ -32,87 +95,150 @@ const reconnectFailed = ref(false)
 const reconnectAttempt = ref(0)
 const reconnectMaxAttempts = ref(0)
 const reconnectDelay = ref(0)
+const reconnectTotalCount = ref(0)
+const lastSyncText = ref('-')
+
 const sessionInfo = ref<SessionJoinVO | null>(null)
 const sessionDetail = ref<SessionDetailVO | null>(null)
+const loadingMembers = ref(false)
+const memberPanelCollapsed = ref(false)
+const includeHistoryMembers = ref(false)
 const navigatingAway = ref(false)
 const currentUserId = ref<number | null>(authStore.user?.userId ?? null)
-const memberViewTab = ref<'active' | 'left' | 'removed'>('active')
-const loadingMembers = ref(false)
-let membersRefreshTimer: number | null = null
-let membersRefreshRequestId = 0
-const HEARTBEAT_INTERVAL_MS = 20000
-let heartbeatTimer: number | undefined
-let wsClient: WebSocketClient | null = null
-let onMemberJoined: ((payload: MemberJoinedData) => void) | null = null
-let onMemberLeft: ((payload: MemberJoinedData) => void) | null = null
+
+const activeTool = ref<CanvasTool>('select')
+const strokeColor = ref('#1f2937')
+const fillColor = ref('transparent')
+const strokeWidth = ref(2)
+const zoomPercent = ref(100)
+const viewportOffset = ref<Point>({ x: 0, y: 0 })
+const panMode = ref(false)
+const zoomOptions = [50, 75, 100, 125, 150, 200]
+const selectedObjectKey = ref<string | null>(null)
+const textEditing = ref(false)
+const textEditorValue = ref('')
+const textEditorPoint = ref<Point>({ x: 0, y: 0 })
+const textEditorInputRef = ref<HTMLInputElement | null>(null)
+const textEditingTargetObjectKey = ref<string | null>(null)
+const shortcutDialogVisible = ref(false)
+const operationHistoryVisible = ref(false)
+const operationHistory = ref<OperationHistoryItem[]>([])
+const focusedObjectKey = ref<string | null>(null)
+const textEditorWidth = computed(() => {
+  const content = textEditorValue.value || '输入文本，回车确认'
+  const estimated = content.length * 14 + 28
+  return Math.max(180, Math.min(360, estimated))
+})
+
+const draft = ref<DraftGraphic>({
+  active: false,
+  start: { x: 0, y: 0 },
+  end: { x: 0, y: 0 },
+  points: [],
+})
+
+const dragMove = ref<DragMove>({
+  active: false,
+  objectKey: '',
+  start: { x: 0, y: 0 },
+  baseX: 0,
+  baseY: 0,
+  basePathPoints: null,
+  originalGraphic: null,
+})
+
+const resizeState = ref<ResizeState>({
+  active: false,
+  objectKey: '',
+  handle: null,
+  originalGraphic: null,
+})
+const panState = ref<PanState>({
+  active: false,
+  start: { x: 0, y: 0 },
+  originOffset: { x: 0, y: 0 },
+})
+
+const syncingSelectedStyle = ref(false)
 
 const sessionKey = computed(() => String(route.params.sessionKey || ''))
-const memberRoleText = (role: number): string => (role === 2 ? '创建者' : '成员')
-const wsUrl = computed(() => {
-  const baseApi = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000/api/'
-  const origin = baseApi.replace(/\/api\/?$/, '')
-  return `${origin.replace(/^http/i, 'ws')}/ws`
+const zoomScale = computed(() => zoomPercent.value / 100)
+const currentVersion = computed(() => sessionDetail.value?.currentVersion ?? sessionInfo.value?.currentVersion ?? 0)
+const currentSessionName = computed(() => sessionDetail.value?.name ?? sessionInfo.value?.name ?? '未命名会话')
+const sortedGraphics = computed(() => [...canvasStore.graphics].sort((a, b) => a.zIndex - b.zIndex))
+const selectedGraphic = computed(() =>
+  selectedObjectKey.value ? canvasStore.graphics.find((item) => item.objectKey === selectedObjectKey.value) ?? null : null,
+)
+const canDeleteSelected = computed(() => !!selectedGraphic.value)
+const canvasCursor = computed(() => {
+  if (panState.value.active) {
+    return 'grabbing'
+  }
+  if (panMode.value) {
+    return 'grab'
+  }
+  return activeTool.value === 'select' ? 'default' : 'crosshair'
 })
-
-const connectionStatusText = computed(() => {
-  if (reconnectFailed.value) {
-    return '重连失败'
+const canBringForward = computed(() => {
+  const selected = selectedGraphic.value
+  if (!selected) {
+    return false
   }
-  if (reconnecting.value) {
-    return '重连中'
-  }
-  if (wsConnected.value) {
-    return 'WebSocket 已连接'
-  }
-  return 'WebSocket 未连接'
+  return canvasStore.graphics.some((item) => item.zIndex > selected.zIndex)
 })
-
-const connectionStatusClass = computed(() => {
-  if (reconnectFailed.value) {
-    return 'status-failed'
+const canSendBackward = computed(() => {
+  const selected = selectedGraphic.value
+  if (!selected) {
+    return false
   }
-  if (reconnecting.value) {
-    return 'status-reconnecting'
-  }
-  if (wsConnected.value) {
-    return 'status-connected'
-  }
-  return 'status-disconnected'
+  return canvasStore.graphics.some((item) => item.zIndex < selected.zIndex)
 })
-
-const includeHistoryMembers = computed(() => memberViewTab.value !== 'active')
-
-const filteredMembers = computed(() => {
-  const members = sessionDetail.value?.members ?? []
-  if (memberViewTab.value === 'active') {
-    return members.filter((member) => (member.membershipStatus ?? 'active') === 'active')
+const canEditFillColor = computed(() => {
+  const selected = selectedGraphic.value
+  if (!selected) {
+    return false
   }
-  if (memberViewTab.value === 'left') {
-    return members.filter((member) => member.membershipStatus === 'left')
+  if (selected.objectType === 'rect' || selected.objectType === 'circle') {
+    return true
   }
-  return members.filter((member) => member.membershipStatus === 'removed')
+  if (selected.objectType !== 'path') {
+    return false
+  }
+  return isClosedPath(selected.pathPoints ?? [])
 })
-
-const handleBack = () => {
-  navigatingAway.value = true
-  router.push('/')
-}
-
-const handleBackToListFromReconnectFailed = async () => {
-  navigatingAway.value = true
-  if (wsClient) {
-    wsClient.disconnect()
-  }
-  clearHeartbeat()
-  await router.push('/')
-}
-
+const operationHistoryForDisplay = computed(() => {
+  return [...operationHistory.value].sort((a, b) => b.timestamp - a.timestamp)
+})
+const showReconnectHint = computed(() => reconnecting.value || reconnectFailed.value)
 const isCreator = computed(() => {
   if (!sessionDetail.value || !currentUserId.value) {
     return false
   }
   return sessionDetail.value.creatorId === currentUserId.value
 })
+
+let wsClient: WebSocketClient | null = null
+let heartbeatTimer: number | null = null
+let resizeObserver: ResizeObserver | null = null
+let renderFrame: number | null = null
+let membersRefreshTimer: number | null = null
+let membersRefreshRequestId = 0
+let focusHighlightTimer: number | null = null
+
+const HEARTBEAT_MS = 20_000
+const RESIZE_HANDLE_HIT_SIZE = 8
+const RESIZE_MIN_SIZE = 12
+const PATH_CLOSE_DISTANCE = 12
+const TEXT_MIN_FONT_SIZE = 10
+const TEXT_MAX_FONT_SIZE = 120
+const ARROW_HEAD_BASE = 10
+const ARROW_HEAD_MAX = 24
+
+const getWsUrl = (): string => {
+  const baseApi = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000/api/'
+  const origin = baseApi.replace(/\/api\/?$/, '')
+  return `${origin.replace(/^http/i, 'ws')}/ws`
+}
 
 const ensureCurrentUserId = async (): Promise<number | null> => {
   if (currentUserId.value) {
@@ -132,71 +258,21 @@ const ensureCurrentUserId = async (): Promise<number | null> => {
   }
 }
 
-const handleLeaveSession = () => {
-  if (isCreator.value) {
-    ElMessage.warning('创建者不能退出会话，请直接删除会话')
-    return
-  }
-  if (!sessionKey.value) return
-  ElMessageBox.confirm(
-    '退出后将从“我加入的会话”中移除，但你仍可通过邀请链接再次加入。是否继续？',
-    '退出会话确认',
-    {
-      type: 'warning',
-      confirmButtonText: '确认退出',
-      cancelButtonText: '取消',
-    },
-  )
-    .then(async () => {
-      navigatingAway.value = true
-      await sessionApi.leave(sessionKey.value)
-      ElMessage.success('已退出会话，可通过邀请链接再次加入')
-      await router.push('/')
-    })
-    .catch((error: unknown) => {
-      if (error === 'cancel' || error === 'close') {
-        return
-      }
-      ElMessage.error((error as Error)?.message || '退出会话失败')
-    })
-}
-
-const handleDeleteSession = () => {
-  if (!sessionKey.value || !isCreator.value) {
-    return
-  }
-  ElMessageBox.confirm('确认删除该会话吗？删除后会话及成员关系将被清理。', '删除会话确认', {
-    type: 'warning',
-    confirmButtonText: '确认删除',
-    cancelButtonText: '取消',
-  })
-    .then(async () => {
-      navigatingAway.value = true
-      await sessionApi.deleteSession(sessionKey.value)
-      ElMessage.success('会话已删除')
-      await router.push('/my-sessions')
-    })
-    .catch((error: unknown) => {
-      if (error === 'cancel' || error === 'close') {
-        return
-      }
-      ElMessage.error((error as Error)?.message || '删除会话失败')
-    })
-}
-
 const clearHeartbeat = () => {
-  if (heartbeatTimer) {
+  if (heartbeatTimer !== null) {
     window.clearInterval(heartbeatTimer)
-    heartbeatTimer = undefined
+    heartbeatTimer = null
   }
 }
 
 const sendHeartbeat = async () => {
-  if (!joined.value || !sessionKey.value) return
+  if (!joined.value || !sessionKey.value) {
+    return
+  }
   try {
     await sessionApi.heartbeat(sessionKey.value)
   } catch {
-    // 心跳失败不打断页面主流程，交由下次心跳重试。
+    // ignore heartbeat error
   }
 }
 
@@ -207,75 +283,971 @@ const startHeartbeat = () => {
     if (document.visibilityState === 'visible') {
       void sendHeartbeat()
     }
-  }, HEARTBEAT_INTERVAL_MS)
+  }, HEARTBEAT_MS)
 }
 
-const handleVisibilityChange = () => {
-  if (document.visibilityState === 'visible') {
-    startHeartbeat()
+const scheduleRender = () => {
+  if (renderFrame !== null) {
     return
   }
-  clearHeartbeat()
+  renderFrame = window.requestAnimationFrame(() => {
+    renderFrame = null
+    renderCanvas()
+  })
 }
 
-const scheduleMembersRefresh = (delay = 250) => {
-  if (membersRefreshTimer !== null) {
-    window.clearTimeout(membersRefreshTimer)
+const clearRenderFrame = () => {
+  if (renderFrame !== null) {
+    window.cancelAnimationFrame(renderFrame)
+    renderFrame = null
   }
-  membersRefreshTimer = window.setTimeout(() => {
-    membersRefreshTimer = null
-    void refreshSessionMembers()
-  }, delay)
+}
+
+const getCtx = (): CanvasRenderingContext2D | null => {
+  const canvas = canvasRef.value
+  if (!canvas) {
+    return null
+  }
+  return canvas.getContext('2d')
+}
+
+const toCanvasPoint = (event: MouseEvent): Point | null => {
+  const canvas = canvasRef.value
+  if (!canvas) {
+    return null
+  }
+  const rect = canvas.getBoundingClientRect()
+  return {
+    x: (event.clientX - rect.left) / zoomScale.value - viewportOffset.value.x,
+    y: (event.clientY - rect.top) / zoomScale.value - viewportOffset.value.y,
+  }
+}
+
+const normalizeRect = (x: number, y: number, width: number, height: number) => {
+  const left = Math.min(x, x + width)
+  const top = Math.min(y, y + height)
+  const right = Math.max(x, x + width)
+  const bottom = Math.max(y, y + height)
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  }
+}
+
+const getGraphicBounds = (graphic: GraphicVO) => {
+  if (graphic.objectType === 'path') {
+    const points = graphic.pathPoints ?? []
+    if (points.length === 0) {
+      return normalizeRect(graphic.positionX, graphic.positionY, 0, 0)
+    }
+    const xs = points.map((item) => item.x)
+    const ys = points.map((item) => item.y)
+    const minX = Math.min(...xs)
+    const maxX = Math.max(...xs)
+    const minY = Math.min(...ys)
+    const maxY = Math.max(...ys)
+    const pad = Math.max(6, graphic.strokeWidth + 4)
+    return {
+      x: minX - pad,
+      y: minY - pad,
+      width: maxX - minX + pad * 2,
+      height: maxY - minY + pad * 2,
+    }
+  }
+
+  if (graphic.objectType === 'line') {
+    const endX = graphic.positionX + (graphic.width ?? 0)
+    const endY = graphic.positionY + (graphic.height ?? 0)
+    const pad = Math.max(6, graphic.strokeWidth + 4)
+    return {
+      x: Math.min(graphic.positionX, endX) - pad,
+      y: Math.min(graphic.positionY, endY) - pad,
+      width: Math.abs(endX - graphic.positionX) + pad * 2,
+      height: Math.abs(endY - graphic.positionY) + pad * 2,
+    }
+  }
+
+  if (graphic.objectType === 'circle') {
+    const diameterX = Math.abs(graphic.width ?? 0)
+    const diameterY = Math.abs(graphic.height ?? 0)
+    const radiusX = diameterX / 2
+    const radiusY = diameterY / 2
+    return {
+      x: graphic.positionX - radiusX,
+      y: graphic.positionY - radiusY,
+      width: diameterX,
+      height: diameterY,
+    }
+  }
+
+  if (graphic.objectType === 'text') {
+    const width = graphic.width ?? 140
+    const height = graphic.height ?? Math.max((graphic.fontSize ?? 16) + 8, 24)
+    return normalizeRect(graphic.positionX, graphic.positionY, width, height)
+  }
+
+  return normalizeRect(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0)
+}
+
+const pointToSegmentDistance = (p: Point, start: Point, end: Point): number => {
+  const dx = end.x - start.x
+  const dy = end.y - start.y
+  if (dx === 0 && dy === 0) {
+    return Math.hypot(p.x - start.x, p.y - start.y)
+  }
+  const t = Math.max(0, Math.min(1, ((p.x - start.x) * dx + (p.y - start.y) * dy) / (dx * dx + dy * dy)))
+  const projX = start.x + t * dx
+  const projY = start.y + t * dy
+  return Math.hypot(p.x - projX, p.y - projY)
+}
+
+const isClosedPath = (points: Point[]): boolean => {
+  if (points.length < 3) {
+    return false
+  }
+  const first = points[0]
+  const last = points[points.length - 1]
+  if (!first || !last) {
+    return false
+  }
+  return Math.hypot(first.x - last.x, first.y - last.y) <= PATH_CLOSE_DISTANCE
+}
+
+const normalizePathPointsOnFinish = (points: Point[]): Point[] => {
+  if (points.length < 2) {
+    return points
+  }
+  const first = points[0]
+  const last = points[points.length - 1]
+  if (!first || !last) {
+    return points
+  }
+  if (Math.hypot(first.x - last.x, first.y - last.y) > PATH_CLOSE_DISTANCE) {
+    return points
+  }
+  const next = points.slice()
+  next[next.length - 1] = { x: first.x, y: first.y }
+  return next
+}
+
+const buildArrowPathPoints = (start: Point, end: Point, strokeWidthValue: number): Point[] => {
+  const dx = end.x - start.x
+  const dy = end.y - start.y
+  const length = Math.hypot(dx, dy)
+  if (length < 2) {
+    return [start, end]
+  }
+
+  const ux = dx / length
+  const uy = dy / length
+  const headLength = Math.min(ARROW_HEAD_MAX, Math.max(ARROW_HEAD_BASE, strokeWidthValue * 3))
+  const headAngle = Math.PI / 7
+  const cos = Math.cos(headAngle)
+  const sin = Math.sin(headAngle)
+
+  // Rotation around reversed direction vector for left/right arrow wing.
+  const lx = -ux * cos - -uy * sin
+  const ly = -ux * sin + -uy * cos
+  const rx = -ux * cos + -uy * sin
+  const ry = ux * sin + -uy * cos
+
+  const left: Point = {
+    x: end.x + lx * headLength,
+    y: end.y + ly * headLength,
+  }
+  const right: Point = {
+    x: end.x + rx * headLength,
+    y: end.y + ry * headLength,
+  }
+
+  return [
+    { x: start.x, y: start.y },
+    { x: end.x, y: end.y },
+    { x: left.x, y: left.y },
+    { x: end.x, y: end.y },
+    { x: right.x, y: right.y },
+  ]
+}
+
+const pointInGraphic = (point: Point, graphic: GraphicVO): boolean => {
+  if (graphic.objectType === 'path') {
+    const points = graphic.pathPoints ?? []
+    if (points.length < 2) {
+      return false
+    }
+    const hitDistance = Math.max(6, graphic.strokeWidth + 4)
+    for (let i = 1; i < points.length; i += 1) {
+      const start = points[i - 1]
+      const end = points[i]
+      if (!start || !end) {
+        continue
+      }
+      if (pointToSegmentDistance(point, start, end) <= hitDistance) {
+        return true
+      }
+    }
+    return false
+  }
+
+  if (graphic.objectType === 'line') {
+    const start = { x: graphic.positionX, y: graphic.positionY }
+    const end = { x: graphic.positionX + (graphic.width ?? 0), y: graphic.positionY + (graphic.height ?? 0) }
+    return pointToSegmentDistance(point, start, end) <= Math.max(6, graphic.strokeWidth + 4)
+  }
+
+  if (graphic.objectType === 'circle') {
+    const radiusX = Math.max(1, Math.abs(graphic.width ?? 0) / 2)
+    const radiusY = Math.max(1, Math.abs(graphic.height ?? 0) / 2)
+    const normalizedX = (point.x - graphic.positionX) / (radiusX + 4)
+    const normalizedY = (point.y - graphic.positionY) / (radiusY + 4)
+    return normalizedX * normalizedX + normalizedY * normalizedY <= 1
+  }
+
+  const bounds = getGraphicBounds(graphic)
+  return (
+    point.x >= bounds.x &&
+    point.x <= bounds.x + bounds.width &&
+    point.y >= bounds.y &&
+    point.y <= bounds.y + bounds.height
+  )
+}
+
+const pickGraphic = (point: Point): GraphicVO | null => {
+  const reverse = [...sortedGraphics.value].reverse()
+  for (const graphic of reverse) {
+    if (pointInGraphic(point, graphic)) {
+      return graphic
+    }
+  }
+  return null
+}
+
+const drawLine = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
+  ctx.beginPath()
+  ctx.moveTo(graphic.positionX, graphic.positionY)
+  ctx.lineTo(graphic.positionX + (graphic.width ?? 0), graphic.positionY + (graphic.height ?? 0))
+  ctx.strokeStyle = graphic.strokeColor
+  ctx.lineWidth = graphic.strokeWidth
+  ctx.stroke()
+}
+
+const drawRect = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
+  const width = graphic.width ?? 0
+  const height = graphic.height ?? 0
+  if (graphic.fillColor && graphic.fillColor !== 'transparent') {
+    ctx.fillStyle = graphic.fillColor
+    ctx.fillRect(graphic.positionX, graphic.positionY, width, height)
+  }
+  ctx.strokeStyle = graphic.strokeColor
+  ctx.lineWidth = graphic.strokeWidth
+  ctx.strokeRect(graphic.positionX, graphic.positionY, width, height)
+}
+
+const drawCircle = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
+  const radiusX = Math.abs(graphic.width ?? 0) / 2
+  const radiusY = Math.abs(graphic.height ?? 0) / 2
+  ctx.beginPath()
+  ctx.ellipse(graphic.positionX, graphic.positionY, radiusX, radiusY, 0, 0, Math.PI * 2)
+  if (graphic.fillColor && graphic.fillColor !== 'transparent') {
+    ctx.fillStyle = graphic.fillColor
+    ctx.fill()
+  }
+  ctx.strokeStyle = graphic.strokeColor
+  ctx.lineWidth = graphic.strokeWidth
+  ctx.stroke()
+}
+
+const drawText = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
+  const fontSize = graphic.fontSize ?? 16
+  ctx.fillStyle = graphic.strokeColor
+  ctx.font = `${fontSize}px sans-serif`
+  ctx.textBaseline = 'top'
+  ctx.fillText(graphic.textContent ?? '', graphic.positionX, graphic.positionY)
+}
+
+const drawPath = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
+  const points = graphic.pathPoints ?? []
+  if (points.length < 2) {
+    return
+  }
+  const first = points[0]
+  if (!first) {
+    return
+  }
+  ctx.beginPath()
+  ctx.moveTo(first.x, first.y)
+  for (let i = 1; i < points.length; i += 1) {
+    const point = points[i]
+    if (!point) {
+      continue
+    }
+    ctx.lineTo(point.x, point.y)
+  }
+  if (isClosedPath(points)) {
+    ctx.closePath()
+    if (graphic.fillColor && graphic.fillColor !== 'transparent') {
+      ctx.fillStyle = graphic.fillColor
+      ctx.fill()
+    }
+  }
+  ctx.strokeStyle = graphic.strokeColor
+  ctx.lineWidth = graphic.strokeWidth
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.stroke()
+}
+
+const drawGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
+  switch (graphic.objectType) {
+    case 'line':
+      drawLine(ctx, graphic)
+      break
+    case 'rect':
+      drawRect(ctx, graphic)
+      break
+    case 'circle':
+      drawCircle(ctx, graphic)
+      break
+    case 'text':
+      drawText(ctx, graphic)
+      break
+    case 'path':
+      drawPath(ctx, graphic)
+      break
+    default:
+      break
+  }
+}
+
+const drawGrid = (
+  ctx: CanvasRenderingContext2D,
+  viewLeft: number,
+  viewTop: number,
+  viewRight: number,
+  viewBottom: number,
+) => {
+  const gap = 24
+  ctx.save()
+  ctx.strokeStyle = '#eef2f7'
+  ctx.lineWidth = 1
+  const startX = Math.floor(viewLeft / gap) * gap
+  const endX = Math.ceil(viewRight / gap) * gap
+  const startY = Math.floor(viewTop / gap) * gap
+  const endY = Math.ceil(viewBottom / gap) * gap
+
+  for (let x = startX; x <= endX; x += gap) {
+    ctx.beginPath()
+    ctx.moveTo(x, viewTop)
+    ctx.lineTo(x, viewBottom)
+    ctx.stroke()
+  }
+  for (let y = startY; y <= endY; y += gap) {
+    ctx.beginPath()
+    ctx.moveTo(viewLeft, y)
+    ctx.lineTo(viewRight, y)
+    ctx.stroke()
+  }
+  ctx.restore()
+}
+
+const drawSelection = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
+  const bounds = getGraphicBounds(graphic)
+  const isFocused = focusedObjectKey.value === graphic.objectKey
+  ctx.save()
+  ctx.strokeStyle = isFocused ? '#f59e0b' : '#1890ff'
+  ctx.lineWidth = isFocused ? 2 : 1
+  ctx.setLineDash(isFocused ? [] : [4, 4])
+  ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height)
+  ctx.setLineDash([])
+  const handles: Point[] =
+    graphic.objectType === 'text'
+      ? [{ x: bounds.x + bounds.width, y: bounds.y + bounds.height }]
+      : [
+          { x: bounds.x, y: bounds.y },
+          { x: bounds.x + bounds.width / 2, y: bounds.y },
+          { x: bounds.x + bounds.width, y: bounds.y },
+          { x: bounds.x, y: bounds.y + bounds.height / 2 },
+          { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 },
+          { x: bounds.x, y: bounds.y + bounds.height },
+          { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height },
+          { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+        ]
+  ctx.fillStyle = isFocused ? '#f59e0b' : '#1890ff'
+  handles.forEach((point) => {
+    ctx.fillRect(point.x - 3, point.y - 3, 6, 6)
+  })
+  ctx.restore()
+}
+
+const getResizeHandlePoints = (graphic: GraphicVO): Record<ResizeHandleKey, Point> => {
+  const bounds = getGraphicBounds(graphic)
+  return {
+    nw: { x: bounds.x, y: bounds.y },
+    ne: { x: bounds.x + bounds.width, y: bounds.y },
+    sw: { x: bounds.x, y: bounds.y + bounds.height },
+    se: { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+  }
+}
+
+const hitResizeHandle = (point: Point, graphic: GraphicVO): ResizeHandleKey | null => {
+  if (graphic.objectType !== 'rect' && graphic.objectType !== 'circle' && graphic.objectType !== 'text') {
+    return null
+  }
+  if (graphic.objectType === 'text') {
+    const se = getResizeHandlePoints(graphic).se
+    if (Math.abs(point.x - se.x) <= RESIZE_HANDLE_HIT_SIZE && Math.abs(point.y - se.y) <= RESIZE_HANDLE_HIT_SIZE) {
+      return 'se'
+    }
+    return null
+  }
+  const handles = getResizeHandlePoints(graphic)
+  for (const key of Object.keys(handles) as ResizeHandleKey[]) {
+    const handle = handles[key]
+    if (Math.abs(point.x - handle.x) <= RESIZE_HANDLE_HIT_SIZE && Math.abs(point.y - handle.y) <= RESIZE_HANDLE_HIT_SIZE) {
+      return key
+    }
+  }
+  return null
+}
+
+const normalizeResizeRectFromHandle = (anchor: Point, moving: Point) => {
+  const left = Math.min(anchor.x, moving.x)
+  const right = Math.max(anchor.x, moving.x)
+  const top = Math.min(anchor.y, moving.y)
+  const bottom = Math.max(anchor.y, moving.y)
+  const width = Math.max(RESIZE_MIN_SIZE, right - left)
+  const height = Math.max(RESIZE_MIN_SIZE, bottom - top)
+  return {
+    x: left,
+    y: top,
+    width,
+    height,
+  }
+}
+
+const updateGraphicByResize = (graphic: GraphicVO, handle: ResizeHandleKey, moving: Point): GraphicVO => {
+  const bounds = getGraphicBounds(graphic)
+  const anchor: Point =
+    handle === 'nw'
+      ? { x: bounds.x + bounds.width, y: bounds.y + bounds.height }
+      : handle === 'ne'
+        ? { x: bounds.x, y: bounds.y + bounds.height }
+        : handle === 'sw'
+          ? { x: bounds.x + bounds.width, y: bounds.y }
+          : { x: bounds.x, y: bounds.y }
+
+  if (graphic.objectType === 'rect') {
+    const rect = normalizeResizeRectFromHandle(anchor, moving)
+    return {
+      ...graphic,
+      positionX: rect.x,
+      positionY: rect.y,
+      width: rect.width,
+      height: rect.height,
+    }
+  }
+
+  if (graphic.objectType === 'text') {
+    const rect = normalizeResizeRectFromHandle(anchor, moving)
+    const originalBounds = getGraphicBounds(graphic)
+    const baseHeight = Math.max(1, originalBounds.height)
+    const ratio = rect.height / baseHeight
+    const nextFontSize = Math.max(
+      TEXT_MIN_FONT_SIZE,
+      Math.min(TEXT_MAX_FONT_SIZE, Math.round((graphic.fontSize ?? 16) * ratio)),
+    )
+    return {
+      ...graphic,
+      positionX: rect.x,
+      positionY: rect.y,
+      width: rect.width,
+      height: rect.height,
+      fontSize: nextFontSize,
+    }
+  }
+
+  const rect = normalizeResizeRectFromHandle(anchor, moving)
+  return {
+    ...graphic,
+    positionX: rect.x + rect.width / 2,
+    positionY: rect.y + rect.height / 2,
+    width: rect.width,
+    height: rect.height,
+  }
+}
+
+const updateSelectedGraphicStyle = (patch: Partial<Pick<GraphicVO, 'strokeColor' | 'fillColor' | 'strokeWidth'>>) => {
+  const selected = selectedGraphic.value
+  if (!selected) {
+    return
+  }
+  const index = canvasStore.graphics.findIndex((item) => item.objectKey === selected.objectKey)
+  if (index === -1) {
+    return
+  }
+  const current = canvasStore.graphics[index]
+  if (!current) {
+    return
+  }
+  const nextGraphic: GraphicVO = {
+    ...current,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  }
+  canvasStore.graphics[index] = nextGraphic
+  sendUpdateGraphic(nextGraphic)
+}
+
+const getPreviewGraphic = (): GraphicVO | null => {
+  if (!draft.value.active || activeTool.value === 'select' || activeTool.value === 'text') {
+    return null
+  }
+
+  const start = draft.value.start
+  const end = draft.value.end
+  const width = end.x - start.x
+  const height = end.y - start.y
+
+  if (activeTool.value === 'line') {
+    return {
+      id: -1,
+      sessionId: sessionInfo.value?.sessionId ?? 0,
+      objectKey: '__preview__',
+      objectType: 'line',
+      positionX: start.x,
+      positionY: start.y,
+      width,
+      height,
+      strokeColor: strokeColor.value,
+      fillColor: null,
+      strokeWidth: strokeWidth.value,
+      textContent: null,
+      fontSize: null,
+      pathPoints: null,
+      zIndex: 0,
+      version: 0,
+      creatorId: currentUserId.value ?? 0,
+      createdAt: '',
+      updatedAt: '',
+    }
+  }
+
+  if (activeTool.value === 'arrow') {
+    const points = buildArrowPathPoints(start, end, strokeWidth.value)
+    return {
+      id: -1,
+      sessionId: sessionInfo.value?.sessionId ?? 0,
+      objectKey: '__preview__',
+      objectType: 'path',
+      positionX: start.x,
+      positionY: start.y,
+      width: null,
+      height: null,
+      strokeColor: strokeColor.value,
+      fillColor: null,
+      strokeWidth: strokeWidth.value,
+      textContent: null,
+      fontSize: null,
+      pathPoints: points,
+      zIndex: 0,
+      version: 0,
+      creatorId: currentUserId.value ?? 0,
+      createdAt: '',
+      updatedAt: '',
+    }
+  }
+
+  if (activeTool.value === 'rect') {
+    return {
+      id: -1,
+      sessionId: sessionInfo.value?.sessionId ?? 0,
+      objectKey: '__preview__',
+      objectType: 'rect',
+      positionX: start.x,
+      positionY: start.y,
+      width,
+      height,
+      strokeColor: strokeColor.value,
+      fillColor: fillColor.value === 'transparent' ? null : fillColor.value,
+      strokeWidth: strokeWidth.value,
+      textContent: null,
+      fontSize: null,
+      pathPoints: null,
+      zIndex: 0,
+      version: 0,
+      creatorId: currentUserId.value ?? 0,
+      createdAt: '',
+      updatedAt: '',
+    }
+  }
+
+  if (activeTool.value === 'brush') {
+    const points = normalizePathPointsOnFinish(draft.value.points)
+    if (points.length < 2) {
+      return null
+    }
+    const first = points[0]
+    if (!first) {
+      return null
+    }
+    return {
+      id: -1,
+      sessionId: sessionInfo.value?.sessionId ?? 0,
+      objectKey: '__preview__',
+      objectType: 'path',
+      positionX: first.x,
+      positionY: first.y,
+      width: null,
+      height: null,
+      strokeColor: strokeColor.value,
+      fillColor: isClosedPath(points) ? fillColor.value === 'transparent' ? null : fillColor.value : null,
+      strokeWidth: strokeWidth.value,
+      textContent: null,
+      fontSize: null,
+      pathPoints: points.map((item) => ({ x: item.x, y: item.y })),
+      zIndex: 0,
+      version: 0,
+      creatorId: currentUserId.value ?? 0,
+      createdAt: '',
+      updatedAt: '',
+    }
+  }
+
+  const normalized = normalizeRect(start.x, start.y, width, height)
+  return {
+    id: -1,
+    sessionId: sessionInfo.value?.sessionId ?? 0,
+    objectKey: '__preview__',
+    objectType: 'circle',
+    positionX: normalized.x + normalized.width / 2,
+    positionY: normalized.y + normalized.height / 2,
+    width: normalized.width,
+    height: normalized.height,
+    strokeColor: strokeColor.value,
+    fillColor: fillColor.value === 'transparent' ? null : fillColor.value,
+    strokeWidth: strokeWidth.value,
+    textContent: null,
+    fontSize: null,
+    pathPoints: null,
+    zIndex: 0,
+    version: 0,
+    creatorId: currentUserId.value ?? 0,
+    createdAt: '',
+    updatedAt: '',
+  }
+}
+
+const drawPreview = (ctx: CanvasRenderingContext2D) => {
+  const preview = getPreviewGraphic()
+  if (!preview) {
+    return
+  }
+  ctx.save()
+  ctx.setLineDash([5, 5])
+  drawGraphic(ctx, preview)
+  ctx.restore()
+}
+
+const renderCanvas = () => {
+  const canvas = canvasRef.value
+  const ctx = getCtx()
+  if (!canvas || !ctx) {
+    return
+  }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.save()
+  ctx.scale(zoomScale.value, zoomScale.value)
+  ctx.translate(viewportOffset.value.x, viewportOffset.value.y)
+
+  const worldWidth = canvas.width / zoomScale.value
+  const worldHeight = canvas.height / zoomScale.value
+  const viewLeft = -viewportOffset.value.x
+  const viewTop = -viewportOffset.value.y
+  const viewRight = viewLeft + worldWidth
+  const viewBottom = viewTop + worldHeight
+
+  drawGrid(ctx, viewLeft, viewTop, viewRight, viewBottom)
+  sortedGraphics.value.forEach((graphic) => drawGraphic(ctx, graphic))
+  drawPreview(ctx)
+
+  if (selectedGraphic.value) {
+    drawSelection(ctx, selectedGraphic.value)
+  }
+
+  ctx.restore()
+}
+
+const resizeCanvas = () => {
+  const canvas = canvasRef.value
+  const container = canvasContainerRef.value
+  if (!canvas || !container) {
+    return
+  }
+  const width = Math.max(1, Math.floor(container.clientWidth))
+  const height = Math.max(1, Math.floor(container.clientHeight))
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width
+    canvas.height = height
+  }
+  scheduleRender()
+}
+
+const setupResizeObserver = () => {
+  if (!canvasContainerRef.value) {
+    return
+  }
+  resizeObserver = new ResizeObserver(() => {
+    resizeCanvas()
+  })
+  resizeObserver.observe(canvasContainerRef.value)
+}
+
+const teardownResizeObserver = () => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+}
+
+const upsertGraphic = (graphic: GraphicVO) => {
+  const index = canvasStore.graphics.findIndex((item) => item.objectKey === graphic.objectKey)
+  if (index === -1) {
+    canvasStore.graphics.push(graphic)
+  } else {
+    canvasStore.graphics[index] = graphic
+  }
+  scheduleRender()
+}
+
+const patchGraphic = (patch: { objectKey: string } & Partial<GraphicVO>) => {
+  const index = canvasStore.graphics.findIndex((item) => item.objectKey === patch.objectKey)
+  if (index === -1) {
+    return
+  }
+  const current = canvasStore.graphics[index]
+  if (!current) {
+    return
+  }
+  canvasStore.graphics[index] = {
+    ...current,
+    ...patch,
+    objectKey: current.objectKey,
+  }
+  scheduleRender()
+}
+
+const removeGraphic = (objectKey: string) => {
+  const index = canvasStore.graphics.findIndex((item) => item.objectKey === objectKey)
+  if (index === -1) {
+    return
+  }
+  canvasStore.graphics.splice(index, 1)
+  if (selectedObjectKey.value === objectKey) {
+    selectedObjectKey.value = null
+  }
+  scheduleRender()
+}
+
+const mergeGraphicsByObjectKey = (incoming: GraphicVO[]) => {
+  if (incoming.length === 0) {
+    return
+  }
+  const map = new Map(canvasStore.graphics.map((item) => [item.objectKey, item]))
+  incoming.forEach((item) => {
+    map.set(item.objectKey, item)
+  })
+  canvasStore.graphics = Array.from(map.values())
+}
+
+const updateSessionVersion = (version: number) => {
+  if (sessionInfo.value) {
+    sessionInfo.value.currentVersion = version
+  }
+  if (sessionDetail.value) {
+    sessionDetail.value.currentVersion = version
+  }
+}
+
+const syncGraphicsFromServer = async (forceFull = false) => {
+  if (!sessionKey.value) {
+    return
+  }
+  try {
+    const sinceVersion = forceFull ? undefined : currentVersion.value
+    const result = await graphicApi.getGraphics(sessionKey.value, sinceVersion)
+    if (forceFull || typeof sinceVersion !== 'number' || sinceVersion <= 0) {
+      canvasStore.graphics = [...result.graphics]
+    } else {
+      mergeGraphicsByObjectKey(result.graphics)
+    }
+    updateSessionVersion(result.currentVersion)
+    scheduleRender()
+  } catch (error: any) {
+    feedback.errorFrom(error, '同步画布失败')
+  }
+}
+
+const applyMemberList = (members: MemberVO[]) => {
+  if (!sessionDetail.value) {
+    return
+  }
+  sessionDetail.value.members = members
+  sessionDetail.value.memberCount = members.length
+  sessionDetail.value.onlineMemberCount = members.filter((item) => item.onlineStatus === 1).length
 }
 
 const patchMemberOnlineStatus = (payload: MemberJoinedData, onlineStatus: number) => {
   if (!sessionDetail.value || payload.sessionKey !== sessionKey.value) {
     return
   }
-
-  const currentMembers = sessionDetail.value.members ?? []
-  const hasTargetMember = currentMembers.some((item) => item.userId === payload.userId)
-  const serverHasFullMembers = payload.members.length > 0
-
-  if (serverHasFullMembers) {
-    sessionDetail.value = {
-      ...sessionDetail.value,
-      members: payload.members,
-      onlineMemberCount: payload.members.filter((item) => item.onlineStatus === 1).length,
-    }
+  if (payload.members.length > 0) {
+    applyMemberList(payload.members)
     return
   }
-
-  if (hasTargetMember) {
-    const nextMembers = currentMembers.map((item) => {
-      if (item.userId !== payload.userId) {
-        return item
-      }
-      return {
-        ...item,
-        onlineStatus,
-      }
-    })
-
-    sessionDetail.value = {
-      ...sessionDetail.value,
-      members: nextMembers,
-      onlineMemberCount: nextMembers.filter((item) => item.onlineStatus === 1).length,
-    }
+  const members = [...(sessionDetail.value.members ?? [])]
+  const index = members.findIndex((item) => item.userId === payload.userId)
+  if (index === -1) {
+    scheduleMembersRefresh(200)
     return
   }
-
-  // 后端推送不含完整 members 且本地无该成员时，不猜字段，改为触发一次轻量刷新。
-  scheduleMembersRefresh()
+  const prev = members[index]
+  if (!prev) {
+    return
+  }
+  members[index] = {
+    ...prev,
+    username: payload.username || prev.username,
+    onlineStatus,
+  }
+  applyMemberList(members)
 }
 
-const handleWsConnected = (_payload: ConnectedEventData) => {
+const handleSessionJoined = (payload: SessionJoinedData) => {
+  if (payload.sessionKey !== sessionKey.value) {
+    return
+  }
+  sessionInfo.value = {
+    sessionId: payload.sessionId,
+    sessionKey: payload.sessionKey,
+    name: payload.name,
+    currentVersion: payload.currentVersion,
+    graphics: payload.graphics,
+  }
+  if (sessionDetail.value) {
+    sessionDetail.value = {
+      ...sessionDetail.value,
+      sessionId: payload.sessionId,
+      sessionKey: payload.sessionKey,
+      name: payload.name,
+      currentVersion: payload.currentVersion,
+      members: payload.members,
+      memberCount: payload.members.length,
+      onlineMemberCount: payload.members.filter((item) => item.onlineStatus === 1).length,
+    }
+  }
+  canvasStore.graphics = [...payload.graphics]
+  scheduleRender()
+}
+
+const handleSessionLeft = async (payload: SessionLeftData) => {
+  if (payload.sessionKey !== sessionKey.value || navigatingAway.value) {
+    return
+  }
+  navigatingAway.value = true
+  feedback.info('你已离开当前会话')
+  if (wsClient) {
+    wsClient.disconnect()
+  }
+  clearHeartbeat()
+  await router.push('/')
+}
+
+const handleGraphicCreated = (payload: GraphicCreatedData) => {
+  if (payload.sessionKey !== sessionKey.value) {
+    return
+  }
+  upsertGraphic(payload.graphic)
+  pushOperationHistory({
+    operationType: 'create_graphic',
+    objectKey: payload.graphic.objectKey,
+    userId: payload.userId,
+    source: payload.userId === currentUserId.value ? 'local' : 'remote',
+  })
+  updateSessionVersion(payload.currentVersion)
+  lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+const handleGraphicUpdated = (payload: GraphicUpdatedData) => {
+  if (payload.sessionKey !== sessionKey.value) {
+    return
+  }
+  patchGraphic(payload.graphic)
+  pushOperationHistory({
+    operationType: 'update_graphic',
+    objectKey: payload.graphic.objectKey,
+    userId: payload.userId,
+    source: payload.userId === currentUserId.value ? 'local' : 'remote',
+  })
+  updateSessionVersion(payload.currentVersion)
+  lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+const handleGraphicDeleted = (payload: GraphicDeletedData) => {
+  if (payload.sessionKey !== sessionKey.value) {
+    return
+  }
+  removeGraphic(payload.objectKey)
+  pushOperationHistory({
+    operationType: 'delete_graphic',
+    objectKey: payload.objectKey,
+    userId: payload.userId,
+    source: payload.userId === currentUserId.value ? 'local' : 'remote',
+  })
+  updateSessionVersion(payload.currentVersion)
+  lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+const handleMemberStatusChanged = (payload: MemberStatusChangedData) => {
+  if (!sessionDetail.value || payload.sessionKey !== sessionKey.value) {
+    return
+  }
+  if (payload.members.length > 0) {
+    applyMemberList(payload.members)
+    return
+  }
+  const members = [...(sessionDetail.value.members ?? [])]
+  const index = members.findIndex((item) => item.userId === payload.userId)
+  if (index === -1) {
+    return
+  }
+  const prev = members[index]
+  if (!prev) {
+    return
+  }
+  members[index] = {
+    ...prev,
+    username: payload.username || prev.username,
+    onlineStatus: payload.onlineStatus,
+  }
+  applyMemberList(members)
+}
+
+const handleWsConnected = (payload: ConnectedEventData) => {
   wsConnected.value = true
   reconnecting.value = false
   reconnectFailed.value = false
   reconnectAttempt.value = 0
   reconnectMaxAttempts.value = 0
   reconnectDelay.value = 0
+  if (payload.reconnectAttempt > 0) {
+    reconnectTotalCount.value += 1
+    // 重连后必须全量同步，增量合并无法得知离线期间的删除对象。
+    void syncGraphicsFromServer(true)
+  }
+  lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 }
 
 const handleWsDisconnected = (_payload: DisconnectedEventData) => {
@@ -299,48 +1271,80 @@ const handleWsReconnectFailed = (payload: ReconnectFailedEventData) => {
 
 const handleWsError = (payload: WsErrorData) => {
   if (payload.code >= 3000 || payload.code === 2001 || payload.code === 2002) {
-    ElMessage.error(payload.message || 'WebSocket 出错')
+    feedback.error(payload.message || 'WebSocket 出错')
   }
 }
 
-const handleSessionLeft = async (payload: SessionLeftData) => {
-  if (payload.sessionKey !== sessionKey.value || navigatingAway.value) {
-    return
-  }
-  navigatingAway.value = true
-  ElMessage.info('你已离开当前会话')
-  if (wsClient) {
-    wsClient.disconnect()
-  }
-  clearHeartbeat()
-  await router.push('/')
+const handleWsMemberJoined = (payload: MemberJoinedData) => {
+  patchMemberOnlineStatus(payload, 1)
 }
 
-const handleSessionJoined = (payload: SessionJoinedData) => {
-  if (payload.sessionKey !== sessionKey.value) {
-    return
+const handleWsMemberLeft = (payload: MemberJoinedData) => {
+  patchMemberOnlineStatus(payload, 0)
+}
+
+const handleWsUndoResult = (data: import('@/ws/types').UndoResultData) => {
+  canvasStore.handleUndoResult(data)
+  if (data.success !== false) {
+    pushOperationHistory({
+      operationType: 'undo',
+      objectKey: data.operation?.objectKey ?? '',
+      userId: data.operation?.userId ?? null,
+      source: 'remote',
+    })
   }
-  joined.value = true
-  sessionInfo.value = {
-    sessionId: payload.sessionId,
-    sessionKey: payload.sessionKey,
-    name: payload.name,
-    currentVersion: payload.currentVersion,
-    graphics: payload.graphics,
+  lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  scheduleRender()
+}
+
+const handleWsRedoResult = (data: import('@/ws/types').RedoResultData) => {
+  canvasStore.handleRedoResult(data)
+  if (data.success !== false) {
+    pushOperationHistory({
+      operationType: 'redo',
+      objectKey: data.operation?.objectKey ?? '',
+      userId: data.operation?.userId ?? null,
+      source: 'remote',
+    })
   }
-  sessionDetail.value = {
-    sessionId: payload.sessionId,
-    sessionKey: payload.sessionKey,
-    name: payload.name,
-    status: 1,
-    creatorId: sessionDetail.value?.creatorId ?? 0,
-    creatorName: sessionDetail.value?.creatorName,
-    memberCount: payload.members.length,
-    onlineMemberCount: payload.members.filter((item) => item.onlineStatus === 1).length,
-    currentVersion: payload.currentVersion,
-    createdAt: sessionDetail.value?.createdAt ?? new Date().toISOString(),
-    members: payload.members,
-  }
+  lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  scheduleRender()
+}
+
+const bindWs = (client: WebSocketClient) => {
+  client.on('connected', handleWsConnected)
+  client.on('disconnected', handleWsDisconnected)
+  client.on('reconnecting', handleWsReconnecting)
+  client.on('reconnect_failed', handleWsReconnectFailed)
+  client.on('error', handleWsError)
+  client.on('session_joined', handleSessionJoined)
+  client.on('session_left', handleSessionLeft)
+  client.on('member_joined', handleWsMemberJoined)
+  client.on('member_left', handleWsMemberLeft)
+  client.on('member_status_changed', handleMemberStatusChanged)
+  client.on('graphic_created', handleGraphicCreated)
+  client.on('graphic_updated', handleGraphicUpdated)
+  client.on('graphic_deleted', handleGraphicDeleted)
+  client.on('undo_result', handleWsUndoResult)
+  client.on('redo_result', handleWsRedoResult)
+}
+
+const unbindWs = (client: WebSocketClient) => {
+  client.off('connected', handleWsConnected)
+  client.off('disconnected', handleWsDisconnected)
+  client.off('reconnecting', handleWsReconnecting)
+  client.off('reconnect_failed', handleWsReconnectFailed)
+  client.off('error', handleWsError)
+  client.off('session_joined', handleSessionJoined)
+  client.off('session_left', handleSessionLeft)
+  client.off('member_joined', handleWsMemberJoined)
+  client.off('member_left', handleWsMemberLeft)
+  client.off('member_status_changed', handleMemberStatusChanged)
+  client.off('graphic_created', handleGraphicCreated)
+  client.off('graphic_updated', handleGraphicUpdated)
+  client.off('graphic_deleted', handleGraphicDeleted)
+  client.off('undo_result', handleWsUndoResult)
+  client.off('redo_result', handleWsRedoResult)
 }
 
 const refreshSessionMembers = async () => {
@@ -362,448 +1366,1499 @@ const refreshSessionMembers = async () => {
       onlineMemberCount: detail.members.filter((item) => item.onlineStatus === 1).length,
     }
   } catch (error: any) {
-    ElMessage.error(error.message || '刷新成员列表失败')
+    feedback.errorFrom(error, '刷新成员列表失败')
   } finally {
     loadingMembers.value = false
   }
 }
 
-const handleChangeMemberViewTab = async (tab: 'active' | 'left' | 'removed') => {
-  if (memberViewTab.value === tab) {
+const scheduleMembersRefresh = (delay = 250) => {
+  if (membersRefreshTimer !== null) {
+    window.clearTimeout(membersRefreshTimer)
+  }
+  membersRefreshTimer = window.setTimeout(() => {
+    membersRefreshTimer = null
+    void refreshSessionMembers()
+  }, delay)
+}
+
+const joinSession = async () => {
+  if (!sessionKey.value || joining.value || joined.value) {
     return
   }
-  memberViewTab.value = tab
-  await refreshSessionMembers()
-}
-
-const memberStatusTagType = (status?: MemberVO['membershipStatus']) => {
-  if (status === 'left') {
-    return 'warning'
-  }
-  if (status === 'removed') {
-    return 'danger'
-  }
-  return 'success'
-}
-
-const memberStatusText = (status?: MemberVO['membershipStatus']) => {
-  if (status === 'left') {
-    return '已退出'
-  }
-  if (status === 'removed') {
-    return '已移除'
-  }
-  return '成员'
-}
-
-const handleRemoveMember = (member: MemberVO) => {
-  if (!sessionKey.value || !sessionDetail.value || !isCreator.value) {
-    return
-  }
-  if (member.role === 2) {
-    ElMessage.warning('不能移除创建者')
-    return
-  }
-  ElMessageBox.confirm(`确认移除成员“${member.username}”吗？`, '移除成员确认', {
-    type: 'warning',
-    confirmButtonText: '确认移除',
-    cancelButtonText: '取消',
-  })
-    .then(async () => {
-      await sessionApi.removeMember(sessionKey.value, member.userId)
-      ElMessage.success('成员已移除')
-      await refreshSessionMembers()
-    })
-    .catch((error: unknown) => {
-      if (error === 'cancel' || error === 'close') {
-        return
-      }
-      ElMessage.error((error as Error)?.message || '移除成员失败')
-    })
-}
-
-const handleTransferCreator = (member: MemberVO) => {
-  if (!sessionKey.value || !sessionDetail.value || !isCreator.value) {
-    return
-  }
-  if (member.role === 2) {
-    ElMessage.warning('该成员已经是创建者')
-    return
-  }
-  if ((member.membershipStatus ?? 'active') !== 'active') {
-    ElMessage.warning('只能转让给当前成员')
-    return
-  }
-
-  ElMessageBox.confirm(
-    `确认将会话创建者身份转让给“${member.username}”吗？转让后你将变为普通成员。`,
-    '转让创建者确认',
-    {
-      type: 'warning',
-      confirmButtonText: '确认转让',
-      cancelButtonText: '取消',
-    },
-  )
-    .then(async () => {
-      await sessionApi.transferCreator(sessionKey.value, member.userId)
-      ElMessage.success('创建者已转让')
-      await refreshSessionMembers()
-    })
-    .catch((error: unknown) => {
-      if (error === 'cancel' || error === 'close') {
-        return
-      }
-      ElMessage.error((error as Error)?.message || '转让创建者失败')
-    })
-}
-
-const handleRetryWsConnect = () => {
-  if (!wsClient) {
-    return
-  }
-  reconnectFailed.value = false
-  reconnecting.value = false
-  reconnectAttempt.value = 0
-  reconnectMaxAttempts.value = 0
-  reconnectDelay.value = 0
-  wsClient.connect()
-}
-
-const bindWsHandlers = (client: WebSocketClient) => {
-  onMemberJoined = (payload) => patchMemberOnlineStatus(payload, 1)
-  onMemberLeft = (payload) => patchMemberOnlineStatus(payload, 0)
-  client.on('connected', handleWsConnected)
-  client.on('disconnected', handleWsDisconnected)
-  client.on('reconnecting', handleWsReconnecting)
-  client.on('reconnect_failed', handleWsReconnectFailed)
-  client.on('error', handleWsError)
-  client.on('session_joined', handleSessionJoined)
-  client.on('session_left', handleSessionLeft)
-  client.on('member_joined', onMemberJoined)
-  client.on('member_left', onMemberLeft)
-}
-
-const unbindWsHandlers = (client: WebSocketClient) => {
-  client.off('connected', handleWsConnected)
-  client.off('disconnected', handleWsDisconnected)
-  client.off('reconnecting', handleWsReconnecting)
-  client.off('reconnect_failed', handleWsReconnectFailed)
-  client.off('error', handleWsError)
-  client.off('session_joined', handleSessionJoined)
-  client.off('session_left', handleSessionLeft)
-  if (onMemberJoined) {
-    client.off('member_joined', onMemberJoined)
-    onMemberJoined = null
-  }
-  if (onMemberLeft) {
-    client.off('member_left', onMemberLeft)
-    onMemberLeft = null
-  }
-}
-
-const joinSessionIfNeeded = async () => {
-  if (!sessionKey.value || joined.value || joining.value) return
-
   joining.value = true
   try {
     await ensureCurrentUserId()
-    // 邀请链接直接访问时，自动调用 join。
-    // 后端已约定 join 幂等：已在成员表时也会成功返回当前会话数据。
-    const res = await sessionApi.join(sessionKey.value)
-    sessionInfo.value = res
-    // members 不在 join 返回中，这里补一次详情查询。
+    const joinedData = await sessionApi.join(sessionKey.value)
+    sessionInfo.value = joinedData
     sessionDetail.value = await sessionApi.getDetail(sessionKey.value, includeHistoryMembers.value)
     joined.value = true
-    startHeartbeat()
+
     const token = storage.getToken()
     if (!token) {
       throw new Error('未登录')
     }
-    const client = new WebSocketClient(wsUrl.value, token, sessionKey.value)
-    bindWsHandlers(client)
+    const client = new WebSocketClient(getWsUrl(), token, sessionKey.value)
+    bindWs(client)
     wsClient = client
-    wsClient.connect()
+    canvasStore.bindSession(joinedData, client)
+    client.connect()
 
-    // 规范化 URL，避免重复历史记录。
+    startHeartbeat()
     await router.replace(`/session/${sessionKey.value}`)
-  } catch (error: any) {
-    ElMessage.error(error.message || '加入会话失败')
+  } catch (error) {
+    feedback.errorFrom(error, '加入会话失败')
     await router.replace('/')
   } finally {
     joining.value = false
   }
 }
 
-onMounted(() => {
-  document.addEventListener('visibilitychange', handleVisibilityChange)
-  joinSessionIfNeeded()
+const handleLeaveSession = async () => {
+  if (!sessionKey.value) {
+    return
+  }
+  try {
+    const confirmed = await confirmDanger('确认退出当前会话吗？', '退出会话', { confirmButtonText: '确认退出' })
+    if (!confirmed) {
+      return
+    }
+    navigatingAway.value = true
+    await sessionApi.leave(sessionKey.value)
+    feedback.success('已退出会话')
+    await router.push('/')
+  } catch (error) {
+    feedback.errorFrom(error, '退出会话失败')
+  }
+}
+
+const handleDeleteSession = async () => {
+  if (!sessionKey.value || !isCreator.value) {
+    return
+  }
+  try {
+    const confirmed = await confirmDanger('确认删除当前会话吗？删除后不可恢复。', '删除会话', {
+      confirmButtonText: '确认删除',
+    })
+    if (!confirmed) {
+      return
+    }
+    navigatingAway.value = true
+    await sessionApi.deleteSession(sessionKey.value)
+    feedback.success('会话已删除')
+    await router.push('/my-sessions')
+  } catch (error) {
+    feedback.errorFrom(error, '删除会话失败')
+  }
+}
+
+const handleTransferCreator = (member: MemberVO) => {
+  if (!sessionKey.value || !isCreator.value) {
+    return
+  }
+  const status = member.membershipStatus ?? 'active'
+  if (status !== 'active') {
+    feedback.warning('只能转交给当前成员')
+    return
+  }
+  confirmDanger(`确认将创建者身份转交给“${member.username}”吗？转交后你将变为普通成员。`, '转交创建者确认', {
+    confirmButtonText: '确认转交',
+  })
+    .then(async (confirmed) => {
+      if (!confirmed) {
+        return
+      }
+      await sessionApi.transferCreator(sessionKey.value, member.userId)
+      feedback.success('创建者身份已转交')
+      await refreshSessionMembers()
+    })
+    .catch((error) => {
+      feedback.errorFrom(error, '转交创建者失败')
+    })
+}
+
+const handleRemoveMember = (member: MemberVO) => {
+  if (!sessionKey.value || !isCreator.value) {
+    return
+  }
+  confirmDanger(`确认移除成员“${member.username}”吗？`, '移除成员', { confirmButtonText: '确认移除' })
+    .then(async (confirmed) => {
+      if (!confirmed) {
+        return
+      }
+      await sessionApi.removeMember(sessionKey.value, member.userId)
+      feedback.success('成员已移除')
+      await refreshSessionMembers()
+    })
+    .catch((error) => {
+      feedback.errorFrom(error, '移除成员失败')
+    })
+}
+
+const handleShare = async () => {
+  const link = `${window.location.origin}/session/${sessionKey.value}`
+  try {
+    await navigator.clipboard.writeText(link)
+    feedback.success('会话链接已复制')
+  } catch {
+    feedback.error('复制失败，请手动复制地址栏链接')
+  }
+}
+
+const sanitizeFilename = (name: string) => {
+  return name.replace(/[\\/:*?"<>|]/g, '_').trim() || '未命名会话'
+}
+
+const formatNowForFilename = () => {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = String(now.getMonth() + 1).padStart(2, '0')
+  const d = String(now.getDate()).padStart(2, '0')
+  const hh = String(now.getHours()).padStart(2, '0')
+  const mm = String(now.getMinutes()).padStart(2, '0')
+  const ss = String(now.getSeconds()).padStart(2, '0')
+  return `${y}${m}${d}_${hh}${mm}${ss}`
+}
+
+const downloadBlob = (blob: Blob, filename: string) => {
+  const objectUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  URL.revokeObjectURL(objectUrl)
+}
+
+const handleExportImage = async () => {
+  const canvas = canvasRef.value
+  if (!canvas) {
+    feedback.error('画布尚未就绪，暂时无法导出')
+    return
+  }
+
+  try {
+    const exportCanvas = document.createElement('canvas')
+    exportCanvas.width = canvas.width
+    exportCanvas.height = canvas.height
+    const exportCtx = exportCanvas.getContext('2d')
+    if (!exportCtx) {
+      feedback.error('导出失败：无法初始化导出画布')
+      return
+    }
+
+    exportCtx.fillStyle = '#ffffff'
+    exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height)
+    exportCtx.drawImage(canvas, 0, 0)
+
+    const blob = await new Promise<Blob | null>((resolve) => {
+      exportCanvas.toBlob((file) => resolve(file), 'image/png', 1)
+    })
+    if (!blob) {
+      feedback.error('导出失败：图片编码失败')
+      return
+    }
+
+    const sessionName = sanitizeFilename(currentSessionName.value)
+    const filename = `${sessionName}_${formatNowForFilename()}.png`
+    downloadBlob(blob, filename)
+    feedback.success('已导出 PNG 图片')
+  } catch (error) {
+    feedback.errorFrom(error, '导出失败')
+  }
+}
+
+const handleShowShortcuts = () => {
+  shortcutDialogVisible.value = true
+}
+
+const handleShowOperationHistory = () => {
+  operationHistoryVisible.value = true
+}
+
+const handleBackToList = async () => {
+  navigatingAway.value = true
+  await router.push('/')
+}
+
+const handleUpdateSessionName = (name: string) => {
+  if (sessionInfo.value) {
+    sessionInfo.value.name = name
+  }
+  if (sessionDetail.value) {
+    sessionDetail.value.name = name
+  }
+}
+
+const toggleMemberPanel = () => {
+  memberPanelCollapsed.value = !memberPanelCollapsed.value
+}
+
+const updateHistoryToggle = async (value: boolean) => {
+  includeHistoryMembers.value = value
+  await refreshSessionMembers()
+}
+
+const onVisibilityChange = () => {
+  if (document.visibilityState === 'visible') {
+    startHeartbeat()
+    return
+  }
+  clearHeartbeat()
+}
+
+const isInputTarget = (target: EventTarget | null) => {
+  const element = target as HTMLElement | null
+  if (!element) {
+    return false
+  }
+  const tag = element.tagName.toLowerCase()
+  return tag === 'input' || tag === 'textarea' || element.isContentEditable
+}
+
+const findMemberNameByUserId = (userId: number | null): string | null => {
+  if (!userId) {
+    return null
+  }
+  const member = sessionDetail.value?.members?.find((item) => item.userId === userId)
+  if (member?.username) {
+    return member.username
+  }
+  if (currentUserId.value === userId) {
+    return authStore.user?.username ?? '我'
+  }
+  return null
+}
+
+const formatOperationTypeLabel = (operationType: OperationHistoryItem['operationType']) => {
+  switch (operationType) {
+    case 'create_graphic':
+      return '创建图元'
+    case 'update_graphic':
+      return '更新图元'
+    case 'delete_graphic':
+      return '删除图元'
+    case 'undo':
+      return '撤销'
+    case 'redo':
+      return '重做'
+    default:
+      return operationType
+  }
+}
+
+const formatOperationSourceLabel = (source: OperationHistorySource) => {
+  switch (source) {
+    case 'local':
+      return '本地'
+    case 'remote':
+      return '协同'
+    case 'system':
+      return '系统'
+    default:
+      return source
+  }
+}
+
+const canLocateHistoryObject = (objectKey: string) => {
+  if (!objectKey) {
+    return false
+  }
+  return canvasStore.graphics.some((item) => item.objectKey === objectKey)
+}
+
+const locateHistoryObject = (item: OperationHistoryItem) => {
+  if (!item.objectKey) {
+    feedback.warning('该记录没有关联图元对象')
+    return
+  }
+  const target = canvasStore.graphics.find((graphic) => graphic.objectKey === item.objectKey)
+  if (!target) {
+    feedback.warning('该图元已不存在，无法定位')
+    return
+  }
+
+  const canvas = canvasRef.value
+  if (canvas) {
+    const bounds = getGraphicBounds(target)
+    const centerX = bounds.x + bounds.width / 2
+    const centerY = bounds.y + bounds.height / 2
+    viewportOffset.value = {
+      x: canvas.width / (2 * zoomScale.value) - centerX,
+      y: canvas.height / (2 * zoomScale.value) - centerY,
+    }
+  }
+
+  selectedObjectKey.value = target.objectKey
+  focusedObjectKey.value = target.objectKey
+  if (focusHighlightTimer !== null) {
+    window.clearTimeout(focusHighlightTimer)
+  }
+  focusHighlightTimer = window.setTimeout(() => {
+    focusedObjectKey.value = null
+    focusHighlightTimer = null
+    scheduleRender()
+  }, 1200)
+  scheduleRender()
+}
+
+const pushOperationHistory = (payload: {
+  operationType: OperationHistoryItem['operationType']
+  objectKey: string
+  userId: number | null
+  source: OperationHistorySource
+}) => {
+  const now = Date.now()
+  const userName = findMemberNameByUserId(payload.userId)
+  const labelPrefix = formatOperationTypeLabel(payload.operationType)
+  const userLabel = userName ? `${labelPrefix} · ${userName}` : labelPrefix
+  const item: OperationHistoryItem = {
+    id: `${now}_${Math.random().toString(36).slice(2, 8)}`,
+    operationType: payload.operationType,
+    objectKey: payload.objectKey,
+    userId: payload.userId,
+    userLabel,
+    source: payload.source,
+    timestamp: now,
+    timeText: new Date(now).toLocaleTimeString('zh-CN', { hour12: false }),
+  }
+  operationHistory.value = [item, ...operationHistory.value].slice(0, 20)
+}
+
+const buildLocalOperation = (
+  operationType: OperationVO['operationType'],
+  objectKey: string,
+  data: Record<string, unknown>,
+): OperationVO => {
+  return {
+    operationId: Date.now(),
+    sessionId: sessionInfo.value?.sessionId ?? 0,
+    userId: currentUserId.value ?? 0,
+    objectKey,
+    operationType,
+    version: currentVersion.value,
+    timestamp: Date.now(),
+    data,
+  }
+}
+
+const sendCreateGraphic = (graphic: GraphicVO) => {
+  if (!wsClient || !canvasStore.currentSession) {
+    return
+  }
+  wsClient.sendCreateGraphic({
+    sessionKey: canvasStore.currentSession.sessionKey,
+    objectKey: graphic.objectKey,
+    objectType: graphic.objectType,
+    positionX: graphic.positionX,
+    positionY: graphic.positionY,
+    width: graphic.width ?? undefined,
+    height: graphic.height ?? undefined,
+    strokeColor: graphic.strokeColor,
+    fillColor: graphic.fillColor ?? undefined,
+    strokeWidth: graphic.strokeWidth,
+    zIndex: graphic.zIndex,
+    textContent: graphic.textContent ?? undefined,
+    fontSize: graphic.fontSize ?? undefined,
+    pathPoints: graphic.pathPoints ?? undefined,
+  })
+
+  canvasStore.pushLocalOperation(
+    buildLocalOperation('create_graphic', graphic.objectKey, {
+      ...graphic,
+    }),
+  )
+  pushOperationHistory({
+    operationType: 'create_graphic',
+    objectKey: graphic.objectKey,
+    userId: currentUserId.value,
+    source: 'local',
+  })
+}
+
+const sendUpdateGraphic = (graphic: GraphicVO) => {
+  if (!wsClient || !canvasStore.currentSession) {
+    return
+  }
+  wsClient.sendUpdateGraphic({
+    sessionKey: canvasStore.currentSession.sessionKey,
+    objectKey: graphic.objectKey,
+    positionX: graphic.positionX,
+    positionY: graphic.positionY,
+    width: graphic.width ?? undefined,
+    height: graphic.height ?? undefined,
+    strokeColor: graphic.strokeColor,
+    fillColor: graphic.fillColor ?? undefined,
+    strokeWidth: graphic.strokeWidth,
+    zIndex: graphic.zIndex,
+    textContent: graphic.textContent ?? undefined,
+    fontSize: graphic.fontSize ?? undefined,
+    pathPoints: graphic.pathPoints ?? undefined,
+  })
+
+  canvasStore.pushLocalOperation(
+    buildLocalOperation('update_graphic', graphic.objectKey, {
+      ...graphic,
+    }),
+  )
+  pushOperationHistory({
+    operationType: 'update_graphic',
+    objectKey: graphic.objectKey,
+    userId: currentUserId.value,
+    source: 'local',
+  })
+}
+
+const deleteSelectedGraphic = () => {
+  const selected = selectedGraphic.value
+  const session = canvasStore.currentSession
+  const client = wsClient
+  if (!selected || !client || !session) {
+    return
+  }
+  client.sendDeleteGraphic(session.sessionKey, selected.objectKey)
+  removeGraphic(selected.objectKey)
+  canvasStore.pushLocalOperation(
+    buildLocalOperation('delete_graphic', selected.objectKey, {
+      ...selected,
+    }),
+  )
+  pushOperationHistory({
+    operationType: 'delete_graphic',
+    objectKey: selected.objectKey,
+    userId: currentUserId.value,
+    source: 'local',
+  })
+}
+
+const isBoundsOverlapped = (
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number },
+) => {
+  return a.x <= b.x + b.width && a.x + a.width >= b.x && a.y <= b.y + b.height && a.y + a.height >= b.y
+}
+
+const findNeighborByZIndex = (selected: GraphicVO, direction: 'forward' | 'backward'): GraphicVO | null => {
+  const selectedBounds = getGraphicBounds(selected)
+  const sameLayerCandidates = canvasStore.graphics.filter((item) => {
+    if (item.objectKey === selected.objectKey) {
+      return false
+    }
+    const itemBounds = getGraphicBounds(item)
+    if (!isBoundsOverlapped(selectedBounds, itemBounds)) {
+      return false
+    }
+    if (direction === 'forward') {
+      return item.zIndex > selected.zIndex
+    }
+    return item.zIndex < selected.zIndex
+  })
+
+  if (sameLayerCandidates.length > 0) {
+    const sorted = [...sameLayerCandidates].sort((a, b) =>
+      direction === 'forward' ? a.zIndex - b.zIndex : b.zIndex - a.zIndex,
+    )
+    return sorted[0] ?? null
+  }
+
+  const globalCandidates = canvasStore.graphics.filter((item) => {
+    if (item.objectKey === selected.objectKey) {
+      return false
+    }
+    return direction === 'forward' ? item.zIndex > selected.zIndex : item.zIndex < selected.zIndex
+  })
+  if (globalCandidates.length === 0) {
+    return null
+  }
+  const sorted = [...globalCandidates].sort((a, b) =>
+    direction === 'forward' ? a.zIndex - b.zIndex : b.zIndex - a.zIndex,
+  )
+  return sorted[0] ?? null
+}
+
+const swapGraphicZIndex = (first: GraphicVO, second: GraphicVO) => {
+  const firstIndex = canvasStore.graphics.findIndex((item) => item.objectKey === first.objectKey)
+  const secondIndex = canvasStore.graphics.findIndex((item) => item.objectKey === second.objectKey)
+  if (firstIndex === -1 || secondIndex === -1) {
+    return
+  }
+  const firstCurrent = canvasStore.graphics[firstIndex]
+  const secondCurrent = canvasStore.graphics[secondIndex]
+  if (!firstCurrent || !secondCurrent) {
+    return
+  }
+
+  const firstNext: GraphicVO = { ...firstCurrent, zIndex: secondCurrent.zIndex, updatedAt: new Date().toISOString() }
+  const secondNext: GraphicVO = { ...secondCurrent, zIndex: firstCurrent.zIndex, updatedAt: new Date().toISOString() }
+  canvasStore.graphics[firstIndex] = firstNext
+  canvasStore.graphics[secondIndex] = secondNext
+
+  sendUpdateGraphic(firstNext)
+  sendUpdateGraphic(secondNext)
+  scheduleRender()
+}
+
+const handleBringForward = () => {
+  const selected = selectedGraphic.value
+  if (!selected) {
+    return
+  }
+  const higher = findNeighborByZIndex(selected, 'forward')
+  if (!higher) {
+    return
+  }
+  swapGraphicZIndex(selected, higher)
+}
+
+const handleSendBackward = () => {
+  const selected = selectedGraphic.value
+  if (!selected) {
+    return
+  }
+  const lower = findNeighborByZIndex(selected, 'backward')
+  if (!lower) {
+    return
+  }
+  swapGraphicZIndex(selected, lower)
+}
+
+const buildGraphicFromDraft = (): GraphicVO | null => {
+  if (!canvasStore.currentSession) {
+    return null
+  }
+  const preview = getPreviewGraphic()
+  if (!preview) {
+    return null
+  }
+  return {
+    ...preview,
+    id: 0,
+    sessionId: canvasStore.currentSession.sessionId,
+    objectKey: generateGraphicObjectKey(),
+    zIndex: canvasStore.graphics.length + 1,
+    version: currentVersion.value,
+    creatorId: currentUserId.value ?? 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+const createTextGraphic = (point: Point) => {
+  if (!canvasStore.currentSession) {
+    return
+  }
+  textEditing.value = true
+  textEditingTargetObjectKey.value = null
+  textEditorValue.value = ''
+  textEditorPoint.value = point
+  nextTick(() => {
+    window.requestAnimationFrame(() => {
+      textEditorInputRef.value?.focus()
+    })
+  })
+}
+
+const startEditTextGraphic = (graphic: GraphicVO) => {
+  textEditing.value = true
+  textEditingTargetObjectKey.value = graphic.objectKey
+  textEditorValue.value = graphic.textContent ?? ''
+  textEditorPoint.value = { x: graphic.positionX, y: graphic.positionY }
+  nextTick(() => {
+    textEditorInputRef.value?.focus()
+    textEditorInputRef.value?.select()
+  })
+}
+
+const cancelTextEditing = () => {
+  textEditing.value = false
+  textEditorValue.value = ''
+  textEditingTargetObjectKey.value = null
+}
+
+const commitTextEditing = () => {
+  if (!canvasStore.currentSession) {
+    cancelTextEditing()
+    return
+  }
+  const content = textEditorValue.value.trim()
+  if (!content) {
+    cancelTextEditing()
+    return
+  }
+
+  const editingObjectKey = textEditingTargetObjectKey.value
+  if (editingObjectKey) {
+    const index = canvasStore.graphics.findIndex((item) => item.objectKey === editingObjectKey)
+    if (index !== -1) {
+      const target = canvasStore.graphics[index]
+      if (target) {
+        const changed = target.textContent !== content
+        if (changed) {
+          const nextGraphic: GraphicVO = {
+            ...target,
+            textContent: content,
+            updatedAt: new Date().toISOString(),
+          }
+          canvasStore.graphics[index] = nextGraphic
+          selectedObjectKey.value = nextGraphic.objectKey
+          sendUpdateGraphic(nextGraphic)
+        }
+        cancelTextEditing()
+        return
+      }
+    }
+  }
+
+  const graphic: GraphicVO = {
+    id: 0,
+    sessionId: canvasStore.currentSession.sessionId,
+    objectKey: generateGraphicObjectKey(),
+    objectType: 'text',
+    positionX: textEditorPoint.value.x,
+    positionY: textEditorPoint.value.y,
+    width: 160,
+    height: 28,
+    strokeColor: strokeColor.value,
+    fillColor: null,
+    strokeWidth: strokeWidth.value,
+    textContent: content,
+    fontSize: 16,
+    pathPoints: null,
+    zIndex: canvasStore.graphics.length + 1,
+    version: currentVersion.value,
+    creatorId: currentUserId.value ?? 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }
+  upsertGraphic(graphic)
+  selectedObjectKey.value = graphic.objectKey
+  sendCreateGraphic(graphic)
+  cancelTextEditing()
+}
+
+const handleMouseDown = (event: MouseEvent) => {
+  if (textEditing.value) {
+    return
+  }
+
+  if (panMode.value) {
+    panState.value = {
+      active: true,
+      start: { x: event.clientX, y: event.clientY },
+      originOffset: { ...viewportOffset.value },
+    }
+    return
+  }
+
+  const point = toCanvasPoint(event)
+  if (!point) {
+    return
+  }
+
+  if (activeTool.value === 'text') {
+    selectedObjectKey.value = null
+    scheduleRender()
+    return
+  }
+
+  if (activeTool.value === 'select') {
+    const selected = selectedGraphic.value
+    if (selected) {
+      const handle = hitResizeHandle(point, selected)
+      if (handle) {
+        resizeState.value = {
+          active: true,
+          objectKey: selected.objectKey,
+          handle,
+          originalGraphic: { ...selected },
+        }
+        scheduleRender()
+        return
+      }
+    }
+
+    const target = pickGraphic(point)
+    selectedObjectKey.value = target?.objectKey ?? null
+    if (target) {
+      dragMove.value = {
+        active: true,
+        objectKey: target.objectKey,
+        start: point,
+        baseX: target.positionX,
+        baseY: target.positionY,
+        basePathPoints: target.pathPoints ? target.pathPoints.map((item) => ({ x: item.x, y: item.y })) : null,
+        originalGraphic: { ...target },
+      }
+    }
+    scheduleRender()
+    return
+  }
+
+  if (activeTool.value === 'brush') {
+    selectedObjectKey.value = null
+    draft.value = {
+      active: true,
+      start: point,
+      end: point,
+      points: [point],
+    }
+    scheduleRender()
+    return
+  }
+
+  selectedObjectKey.value = null
+  draft.value = {
+    active: true,
+    start: point,
+    end: point,
+    points: [],
+  }
+  scheduleRender()
+}
+
+const handleCanvasClick = (event: MouseEvent) => {
+  if (textEditing.value || activeTool.value !== 'text' || panState.value.active || panMode.value) {
+    return
+  }
+  const point = toCanvasPoint(event)
+  if (!point) {
+    return
+  }
+  const target = pickGraphic(point)
+  if (target?.objectType === 'text') {
+    selectedObjectKey.value = target.objectKey
+    startEditTextGraphic(target)
+    scheduleRender()
+    return
+  }
+  createTextGraphic(point)
+}
+
+const handleCanvasDblClick = (event: MouseEvent) => {
+  if (textEditing.value || activeTool.value !== 'select' || panState.value.active || panMode.value) {
+    return
+  }
+  const point = toCanvasPoint(event)
+  if (!point) {
+    return
+  }
+  const target = pickGraphic(point)
+  if (target?.objectType === 'text') {
+    selectedObjectKey.value = target.objectKey
+    startEditTextGraphic(target)
+    scheduleRender()
+  }
+}
+
+const handleMouseMove = (event: MouseEvent) => {
+  if (panState.value.active) {
+    const dx = (event.clientX - panState.value.start.x) / zoomScale.value
+    const dy = (event.clientY - panState.value.start.y) / zoomScale.value
+    viewportOffset.value = {
+      x: panState.value.originOffset.x + dx,
+      y: panState.value.originOffset.y + dy,
+    }
+    scheduleRender()
+    return
+  }
+
+  const point = toCanvasPoint(event)
+  if (!point) {
+    return
+  }
+
+  if (resizeState.value.active && activeTool.value === 'select') {
+    const handle = resizeState.value.handle
+    const index = canvasStore.graphics.findIndex((item) => item.objectKey === resizeState.value.objectKey)
+    if (!handle || index === -1) {
+      return
+    }
+    const current = canvasStore.graphics[index]
+    if (!current) {
+      return
+    }
+    if (current.objectType !== 'rect' && current.objectType !== 'circle' && current.objectType !== 'text') {
+      return
+    }
+    canvasStore.graphics[index] = updateGraphicByResize(current, handle, point)
+    scheduleRender()
+    return
+  }
+
+  if (dragMove.value.active && activeTool.value === 'select') {
+    const index = canvasStore.graphics.findIndex((item) => item.objectKey === dragMove.value.objectKey)
+    if (index === -1) {
+      return
+    }
+    const current = canvasStore.graphics[index]
+    if (!current) {
+      return
+    }
+    const dx = point.x - dragMove.value.start.x
+    const dy = point.y - dragMove.value.start.y
+    if (current.objectType === 'path') {
+      const movedPoints = (dragMove.value.basePathPoints ?? current.pathPoints ?? []).map((item) => ({
+        x: item.x + dx,
+        y: item.y + dy,
+      }))
+      canvasStore.graphics[index] = {
+        ...current,
+        positionX: dragMove.value.baseX + dx,
+        positionY: dragMove.value.baseY + dy,
+        pathPoints: movedPoints,
+      }
+    } else {
+      canvasStore.graphics[index] = {
+        ...current,
+        positionX: dragMove.value.baseX + dx,
+        positionY: dragMove.value.baseY + dy,
+      }
+    }
+    scheduleRender()
+    return
+  }
+
+  if (!draft.value.active) {
+    return
+  }
+  if (activeTool.value === 'brush') {
+    const last = draft.value.points[draft.value.points.length - 1]
+    if (!last || Math.hypot(point.x - last.x, point.y - last.y) >= 2) {
+      draft.value.points.push(point)
+    }
+  }
+  draft.value.end = point
+  scheduleRender()
+}
+
+const handleMouseUp = () => {
+  if (panState.value.active) {
+    panState.value.active = false
+    return
+  }
+
+  if (resizeState.value.active) {
+    const resized = selectedGraphic.value
+    const original = resizeState.value.originalGraphic
+    resizeState.value.active = false
+    resizeState.value.handle = null
+    if (
+      resized &&
+      original &&
+      (resized.positionX !== original.positionX ||
+        resized.positionY !== original.positionY ||
+        resized.width !== original.width ||
+        resized.height !== original.height)
+    ) {
+      sendUpdateGraphic(resized)
+    }
+    resizeState.value.originalGraphic = null
+    return
+  }
+
+  if (dragMove.value.active) {
+    const moved = selectedGraphic.value
+    const original = dragMove.value.originalGraphic
+    dragMove.value.active = false
+    if (
+      moved &&
+      original &&
+      (moved.positionX !== original.positionX ||
+        moved.positionY !== original.positionY ||
+        moved.width !== original.width ||
+        moved.height !== original.height ||
+        JSON.stringify(moved.pathPoints ?? null) !== JSON.stringify(original.pathPoints ?? null) ||
+        moved.strokeColor !== original.strokeColor ||
+        moved.fillColor !== original.fillColor ||
+        moved.strokeWidth !== original.strokeWidth ||
+        moved.zIndex !== original.zIndex ||
+        moved.textContent !== original.textContent ||
+        moved.fontSize !== original.fontSize)
+    ) {
+      sendUpdateGraphic(moved)
+    }
+    dragMove.value.basePathPoints = null
+    dragMove.value.originalGraphic = null
+    return
+  }
+
+  if (!draft.value.active) {
+    return
+  }
+  const graphic = buildGraphicFromDraft()
+  draft.value.active = false
+  draft.value.points = []
+  if (!graphic) {
+    scheduleRender()
+    return
+  }
+  if (
+    graphic.objectType !== 'text' &&
+    graphic.objectType !== 'path' &&
+    Math.abs(graphic.width ?? 0) < 2 &&
+    Math.abs(graphic.height ?? 0) < 2
+  ) {
+    scheduleRender()
+    return
+  }
+  if (graphic.objectType === 'path' && (graphic.pathPoints?.length ?? 0) < 2) {
+    scheduleRender()
+    return
+  }
+  upsertGraphic(graphic)
+  selectedObjectKey.value = graphic.objectKey
+  sendCreateGraphic(graphic)
+}
+
+const handleMouseLeave = () => {
+  if (panState.value.active) {
+    panState.value.active = false
+  }
+  if (draft.value.active) {
+    draft.value.active = false
+    draft.value.points = []
+  }
+  if (resizeState.value.active) {
+    resizeState.value.active = false
+    resizeState.value.handle = null
+    resizeState.value.originalGraphic = null
+  }
+  if (dragMove.value.active) {
+    dragMove.value.active = false
+    dragMove.value.basePathPoints = null
+    dragMove.value.originalGraphic = null
+  }
+  scheduleRender()
+}
+
+
+const handleUndo = async () => {
+  await canvasStore.undo()
+}
+
+const handleRedo = async () => {
+  await canvasStore.redo()
+}
+
+const clampZoomPercent = (value: number) => {
+  return Math.max(50, Math.min(200, value))
+}
+
+const handleWheel = (event: WheelEvent) => {
+  const canvas = canvasRef.value
+  if (!canvas) {
+    return
+  }
+  const oldZoom = zoomPercent.value
+  const delta = event.deltaY < 0 ? 5 : -5
+  const nextZoom = clampZoomPercent(oldZoom + delta)
+  if (nextZoom === oldZoom) {
+    return
+  }
+
+  const oldScale = oldZoom / 100
+  const newScale = nextZoom / 100
+  const rect = canvas.getBoundingClientRect()
+  const screenX = event.clientX - rect.left
+  const screenY = event.clientY - rect.top
+  const worldX = screenX / oldScale - viewportOffset.value.x
+  const worldY = screenY / oldScale - viewportOffset.value.y
+
+  zoomPercent.value = nextZoom
+  viewportOffset.value = {
+    x: screenX / newScale - worldX,
+    y: screenY / newScale - worldY,
+  }
+}
+
+const handleKeydown = (event: KeyboardEvent) => {
+  if (textEditing.value) {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      commitTextEditing()
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      cancelTextEditing()
+      return
+    }
+    return
+  }
+
+  if (isInputTarget(event.target)) {
+    return
+  }
+
+  if (event.key === 'Delete') {
+    event.preventDefault()
+    deleteSelectedGraphic()
+    return
+  }
+
+  if (!event.ctrlKey && !event.metaKey) {
+    return
+  }
+
+  const key = event.key.toLowerCase()
+  if (key === 'z' && event.shiftKey) {
+    event.preventDefault()
+    void handleRedo()
+    return
+  }
+  if (key === 'z') {
+    event.preventDefault()
+    void handleUndo()
+    return
+  }
+  if (key === 'y') {
+    event.preventDefault()
+    void handleRedo()
+  }
+}
+
+const handleRetryConnect = () => {
+  if (!wsClient) {
+    return
+  }
+  reconnecting.value = false
+  reconnectFailed.value = false
+  reconnectAttempt.value = 0
+  reconnectMaxAttempts.value = 0
+  reconnectDelay.value = 0
+  wsClient.connect()
+}
+
+watch(
+  () => selectedGraphic.value,
+  (graphic) => {
+    syncingSelectedStyle.value = true
+    if (!graphic) {
+      strokeColor.value = '#1f2937'
+      fillColor.value = 'transparent'
+      strokeWidth.value = 2
+      syncingSelectedStyle.value = false
+      return
+    }
+    strokeColor.value = graphic.strokeColor || '#1f2937'
+    fillColor.value = graphic.fillColor || 'transparent'
+    strokeWidth.value = graphic.strokeWidth || 2
+    syncingSelectedStyle.value = false
+  },
+  { immediate: true },
+)
+
+watch(
+  () => strokeColor.value,
+  (value) => {
+    if (syncingSelectedStyle.value || !selectedGraphic.value) {
+      return
+    }
+    if (selectedGraphic.value.strokeColor === value) {
+      return
+    }
+    updateSelectedGraphicStyle({ strokeColor: value })
+  },
+)
+
+watch(
+  () => strokeWidth.value,
+  (value) => {
+    if (syncingSelectedStyle.value || !selectedGraphic.value) {
+      return
+    }
+    if (selectedGraphic.value.strokeWidth === value) {
+      return
+    }
+    updateSelectedGraphicStyle({ strokeWidth: value })
+  },
+)
+
+watch(
+  () => fillColor.value,
+  (value) => {
+    if (syncingSelectedStyle.value || !selectedGraphic.value || !canEditFillColor.value) {
+      return
+    }
+    const modelFill = value === 'transparent' ? null : value
+    if (selectedGraphic.value.fillColor === modelFill) {
+      return
+    }
+    updateSelectedGraphicStyle({ fillColor: modelFill })
+  },
+)
+
+watch(
+  () => zoomPercent.value,
+  () => {
+    scheduleRender()
+  },
+)
+
+watch(
+  () => canvasStore.graphics,
+  () => {
+    scheduleRender()
+  },
+  { deep: true },
+)
+
+onMounted(async () => {
+  window.addEventListener('keydown', handleKeydown)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+
+  await joinSession()
+  await nextTick()
+  resizeCanvas()
+  setupResizeObserver()
+  await syncGraphicsFromServer(true)
+  lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  scheduleRender()
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleKeydown)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   clearHeartbeat()
+  clearRenderFrame()
+  teardownResizeObserver()
+
   if (membersRefreshTimer !== null) {
     window.clearTimeout(membersRefreshTimer)
     membersRefreshTimer = null
   }
+  if (focusHighlightTimer !== null) {
+    window.clearTimeout(focusHighlightTimer)
+    focusHighlightTimer = null
+  }
+
   if (wsClient) {
-    unbindWsHandlers(wsClient)
+    unbindWs(wsClient)
     wsClient.disconnect()
     wsClient = null
   }
-  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  canvasStore.clearSession()
 })
 </script>
 
 <template>
   <div class="draw-page">
-    <app-header />
+    <TopBar
+      :session-name="currentSessionName"
+      :members="sessionDetail?.members ?? []"
+      :is-creator="isCreator"
+      :user-avatar="authStore.user?.avatar"
+      @update:session-name="handleUpdateSessionName"
+      @back="handleBackToList"
+      @share="handleShare"
+      @export-image="handleExportImage"
+      @show-history="handleShowOperationHistory"
+      @show-shortcuts="handleShowShortcuts"
+      @leave="handleLeaveSession"
+      @delete-session="handleDeleteSession"
+    />
 
-    <main class="draw-main">
-      <el-card class="draw-card">
-        <template v-if="joining">
-          <el-skeleton animated>
-            <template #template>
-              <el-skeleton-item variant="h3" style="width: 180px" />
-              <el-skeleton-item variant="text" style="margin-top: 12px; width: 70%" />
-              <el-skeleton-item variant="text" style="margin-top: 8px; width: 55%" />
-            </template>
-          </el-skeleton>
-        </template>
+    <div v-if="showReconnectHint" class="reconnect-bar" :class="{ failed: reconnectFailed }">
+      <span v-if="reconnecting">
+        正在重连（第 {{ reconnectAttempt }}/{{ reconnectMaxAttempts }} 次，{{ reconnectDelay / 1000 }} 秒后）
+      </span>
+      <span v-else>重连失败（已尝试 {{ reconnectAttempt }}/{{ reconnectMaxAttempts }} 次）</span>
+      <el-button v-if="reconnectFailed" type="warning" size="small" @click="handleRetryConnect">重试连接</el-button>
+    </div>
 
-        <template v-else>
-          <h2 class="title">绘图会话</h2>
-          <p class="line">会话 Key：{{ sessionKey }}</p>
-          <p class="line">会话名称：{{ sessionInfo?.name ?? sessionDetail?.name ?? '-' }}</p>
-          <p class="line">当前版本：{{ sessionDetail?.currentVersion ?? sessionInfo?.currentVersion ?? 0 }}</p>
-          <p class="line">成员数：{{ sessionDetail?.members?.length ?? 0 }}</p>
-          <p class="line connection-line">
-            连接状态：
-            <span class="status-dot" :class="connectionStatusClass"></span>
-            <span>{{ connectionStatusText }}</span>
-          </p>
-          <p v-if="reconnecting" class="line reconnecting-line">
-            正在重连（第 {{ reconnectAttempt }}/{{ reconnectMaxAttempts }} 次，{{ reconnectDelay / 1000 }} 秒后）
-          </p>
-          <p v-if="reconnectFailed" class="line reconnect-failed-line">
-            重连失败（已尝试 {{ reconnectAttempt }}/{{ reconnectMaxAttempts }} 次），请刷新页面或返回列表重进会话
-          </p>
-          <div v-if="reconnectFailed" class="reconnect-actions">
-            <el-button size="small" type="warning" plain @click="handleRetryWsConnect">重试连接</el-button>
-            <el-button size="small" @click="handleBackToListFromReconnectFailed">返回会话列表</el-button>
+    <div class="draw-main" v-loading="joining">
+      <ToolBar
+        v-model:active-tool="activeTool"
+        v-model:stroke-color="strokeColor"
+        v-model:fill-color="fillColor"
+        v-model:stroke-width="strokeWidth"
+        v-model:pan-mode="panMode"
+        :can-undo="canvasStore.canUndo"
+        :can-redo="canvasStore.canRedo"
+        :zoom-percent="zoomPercent"
+        :can-delete="canDeleteSelected"
+        :can-bring-forward="canBringForward"
+        :can-send-backward="canSendBackward"
+        @undo="handleUndo"
+        @redo="handleRedo"
+        @delete="deleteSelectedGraphic"
+        @bring-forward="handleBringForward"
+        @send-backward="handleSendBackward"
+      />
+
+      <section class="canvas-area">
+        <div class="canvas-container" ref="canvasContainerRef">
+          <div
+            v-if="textEditing"
+            class="text-editor-wrap"
+            :style="{
+              left: `${(textEditorPoint.x + viewportOffset.x) * zoomScale}px`,
+              top: `${(textEditorPoint.y + viewportOffset.y) * zoomScale}px`,
+            }"
+          >
+            <input
+              ref="textEditorInputRef"
+              v-model="textEditorValue"
+              class="text-editor-input"
+              :style="{ width: `${textEditorWidth}px` }"
+              placeholder="输入文本，回车确认"
+              @keydown.enter.prevent="commitTextEditing"
+              @keydown.esc.prevent="cancelTextEditing"
+              @blur="commitTextEditing"
+            />
           </div>
-          <p class="line">画布全量数据：{{ sessionInfo?.graphics ? '已加载' : '暂无' }}</p>
-          <div class="member-controls">
-            <div class="member-view-tabs">
-              <el-button
-                size="small"
-                :type="memberViewTab === 'active' ? 'primary' : 'default'"
-                @click="handleChangeMemberViewTab('active')"
-              >
-                当前成员
-              </el-button>
-              <el-button
-                size="small"
-                :type="memberViewTab === 'left' ? 'primary' : 'default'"
-                @click="handleChangeMemberViewTab('left')"
-              >
-                已退出
-              </el-button>
-              <el-button
-                size="small"
-                :type="memberViewTab === 'removed' ? 'primary' : 'default'"
-                @click="handleChangeMemberViewTab('removed')"
-              >
-                已移除
-              </el-button>
-            </div>
+          <canvas
+            ref="canvasRef"
+            class="draw-canvas"
+            :style="{ cursor: canvasCursor }"
+            @mousedown="handleMouseDown"
+            @click="handleCanvasClick"
+            @dblclick="handleCanvasDblClick"
+            @wheel.prevent="handleWheel"
+            @mousemove="handleMouseMove"
+            @mouseup="handleMouseUp"
+            @mouseleave="handleMouseLeave"
+          />
+        </div>
+      </section>
+
+      <MemberPanel
+        :members="sessionDetail?.members ?? []"
+        :collapsed="memberPanelCollapsed"
+        :include-history="includeHistoryMembers"
+        :loading="loadingMembers"
+        :is-creator="isCreator"
+        :current-user-id="currentUserId"
+        @toggle-collapse="toggleMemberPanel"
+        @update:include-history="updateHistoryToggle"
+        @remove-member="handleRemoveMember"
+        @transfer-creator="handleTransferCreator"
+      />
+    </div>
+
+    <StatusBar
+      :zoom-percent="zoomPercent"
+      :zoom-options="zoomOptions"
+      :graphic-count="canvasStore.graphics.length"
+      :current-version="currentVersion"
+      :connected="wsConnected"
+      :last-sync-at="lastSyncText"
+      :reconnect-count="reconnectTotalCount"
+      @update:zoom-percent="zoomPercent = $event"
+    />
+
+    <el-dialog v-model="shortcutDialogVisible" title="快捷键帮助" width="420px">
+      <div class="shortcut-list">
+        <div class="shortcut-row">
+          <span class="shortcut-action">撤销</span>
+          <code>Ctrl + Z</code>
+        </div>
+        <div class="shortcut-row">
+          <span class="shortcut-action">重做</span>
+          <code>Ctrl + Y / Ctrl + Shift + Z</code>
+        </div>
+        <div class="shortcut-row">
+          <span class="shortcut-action">删除选中图元</span>
+          <code>Delete</code>
+        </div>
+        <div class="shortcut-row">
+          <span class="shortcut-action">文本确认</span>
+          <code>Enter</code>
+        </div>
+        <div class="shortcut-row">
+          <span class="shortcut-action">文本取消</span>
+          <code>Esc</code>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="shortcutDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="operationHistoryVisible" title="操作历史（最近 20 条）" width="560px">
+      <div v-if="operationHistoryForDisplay.length === 0" class="history-empty">暂无操作记录</div>
+      <div v-else class="history-list">
+        <div v-for="item in operationHistoryForDisplay" :key="item.id" class="history-row">
+          <div class="history-main">
+            <span class="history-type">{{ formatOperationTypeLabel(item.operationType) }}</span>
+            <span class="history-user">{{ item.userLabel }}</span>
+            <el-button
+              link
+              type="primary"
+              size="small"
+              :disabled="!canLocateHistoryObject(item.objectKey)"
+              @click="locateHistoryObject(item)"
+            >
+              定位到对象
+            </el-button>
           </div>
-          <div v-if="filteredMembers.length" class="members">
-            <div class="members-title">成员列表</div>
-            <div class="member-list">
-              <div v-for="member in filteredMembers" :key="member.userId" class="member-item">
-                <el-avatar
-                  :size="26"
-                  :src="member.avatar"
-                  class="member-avatar"
-                  :class="{ 'avatar-online': member.onlineStatus === 1 }"
-                  :title="member.onlineStatus === 1 ? '在线' : '离线'"
-                >
-                  {{ member.username.slice(0, 1).toUpperCase() }}
-                </el-avatar>
-                <span class="member-name">{{ member.username }}</span>
-                <span class="member-role">{{ memberRoleText(member.role) }}</span>
-                <el-tag size="small" :type="memberStatusTagType(member.membershipStatus)" effect="plain">
-                  {{ memberStatusText(member.membershipStatus) }}
-                </el-tag>
-                <el-button
-                  v-if="isCreator && member.role !== 2 && (member.membershipStatus || 'active') !== 'removed'"
-                  size="small"
-                  text
-                  type="danger"
-                  @click="handleRemoveMember(member)"
-                >
-                  移除
-                </el-button>
-                <el-button
-                  v-if="isCreator && member.role !== 2 && (member.membershipStatus ?? 'active') === 'active'"
-                  size="small"
-                  text
-                  type="primary"
-                  @click="handleTransferCreator(member)"
-                >
-                  转让创建者
-                </el-button>
-              </div>
-            </div>
+          <div class="history-meta">
+            <span class="history-object">对象: {{ item.objectKey || '-' }}</span>
+            <span class="history-source">{{ formatOperationSourceLabel(item.source) }}</span>
+            <span class="history-time">{{ item.timeText }}</span>
           </div>
-          <p class="hint">Canvas 与 WebSocket 实时协作区域待接入。</p>
-          <div class="actions">
-            <el-button type="primary" @click="handleBack">返回会话列表</el-button>
-            <el-button v-if="isCreator" type="danger" plain @click="handleDeleteSession">删除会话</el-button>
-            <el-button v-else type="warning" plain @click="handleLeaveSession">退出会话</el-button>
-          </div>
-        </template>
-      </el-card>
-    </main>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="operationHistoryVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
 .draw-page {
   min-height: 100vh;
-  background: #f5f7fb;
+  display: grid;
+  grid-template-rows: 56px 1fr 32px;
+  background: #f3f5f9;
 }
 
 .draw-main {
-  padding: 24px;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 136px minmax(0, 1fr) auto;
 }
 
-.draw-card {
-  border-radius: 8px;
+.canvas-area {
+  min-width: 0;
+  padding: 8px;
 }
 
-.title {
-  margin: 0 0 12px;
-  color: #1f2d3d;
+.canvas-container {
+  width: 100%;
+  height: 100%;
+  min-height: calc(100vh - 56px - 32px - 16px);
+  border: 1px solid #dbe2ea;
+  border-radius: 12px;
+  background: #ffffff;
+  overflow: hidden;
+  position: relative;
 }
 
-.line {
-  margin: 0 0 10px;
-  color: #606266;
+.draw-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  position: relative;
+  z-index: 1;
 }
 
-.connection-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.text-editor-wrap {
+  position: absolute;
+  z-index: 20;
+  transform: translate(-2px, -2px);
+  pointer-events: auto;
 }
 
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  display: inline-block;
+.text-editor-input {
+  width: 180px;
+  height: 30px;
+  border: 1px solid #60a5fa;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 14px;
+  color: #111827;
+  background: #ffffff;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.12);
 }
 
-.status-connected {
-  background: #16a34a;
-}
-
-.status-reconnecting {
-  background: #d97706;
-}
-
-.status-failed {
-  background: #dc2626;
-}
-
-.status-disconnected {
-  background: #94a3b8;
-}
-
-.reconnecting-line {
-  color: #d97706;
-}
-
-.reconnect-failed-line {
-  color: #dc2626;
-}
-
-.reconnect-actions {
-  margin: -4px 0 8px;
-}
-
-.hint {
-  margin: 16px 0;
-  color: #909399;
-}
-
-.member-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 8px 0 12px;
-}
-
-.member-view-tabs {
+.reconnect-bar {
+  position: fixed;
+  top: 66px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  background: #fef3c7;
+  color: #92400e;
 }
 
-.actions {
+.reconnect-bar.failed {
+  border-color: #fca5a5;
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.shortcut-list {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 10px;
 }
 
-.members {
-  margin: 12px 0 16px;
-  padding: 10px 12px;
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
   border-radius: 8px;
-  background: #f7f9fd;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
 }
 
-.members-title {
-  margin-bottom: 8px;
+.shortcut-action {
+  color: #111827;
   font-size: 13px;
-  font-weight: 600;
-  color: #2f3c4d;
 }
 
-.member-list {
+.history-empty {
+  color: #6b7280;
+  font-size: 13px;
+  padding: 8px 2px;
+}
+
+.history-list {
+  max-height: 420px;
+  overflow: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.member-item {
+.history-row {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fafafa;
+}
+
+.history-main {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #3d4b5d;
+  margin-bottom: 4px;
 }
 
-.member-name {
-  min-width: 0;
-  max-width: 180px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+.history-type {
+  color: #111827;
+  font-weight: 600;
+  font-size: 13px;
 }
 
-.member-role {
+.history-user {
+  color: #374151;
   font-size: 12px;
-  color: #7f8ea3;
 }
 
-.member-avatar {
-  box-sizing: border-box;
-  border: 2px solid transparent;
+.history-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #6b7280;
+  font-size: 12px;
+  flex-wrap: wrap;
 }
 
-.member-avatar.avatar-online {
-  border-color: #22c55e;
-  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.18);
+@media (max-width: 1024px) {
+  .draw-main {
+    grid-template-columns: 136px minmax(0, 1fr);
+  }
 }
 </style>

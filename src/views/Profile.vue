@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import type { UploadProps } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
@@ -9,16 +8,25 @@ import { userApi } from '@/api/user'
 import { useAuthStore } from '@/stores/auth'
 import type { UpdateProfileDTO, UserVO } from '@/types/user'
 import { storage } from '@/utils/storage'
+import { feedback } from '@/utils/feedback'
 
 const authStore = useAuthStore()
 const loading = ref(false)
 const initLoading = ref(false)
+const passwordLoading = ref(false)
 const formRef = ref<FormInstance>()
+const passwordFormRef = ref<FormInstance>()
 const currentUser = ref<UserVO | null>(null)
 
 const form = reactive({
   username: '',
   avatar: '',
+})
+
+const passwordForm = reactive({
+  currentPassword: '',
+  newPassword: '',
+  confirmPassword: '',
 })
 
 const localAvatarPreview = ref('')
@@ -50,6 +58,30 @@ const rules: FormRules = {
   ],
 }
 
+const validateConfirmPassword = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+  if (!value) {
+    callback(new Error('请再次输入新密码'))
+    return
+  }
+  if (value !== passwordForm.newPassword) {
+    callback(new Error('两次输入的新密码不一致'))
+    return
+  }
+  callback()
+}
+
+const passwordRules: FormRules = {
+  currentPassword: [
+    { required: true, message: '请输入当前密码', trigger: 'blur' },
+    { min: 6, max: 20, message: '密码长度在 6 到 20 个字符', trigger: 'blur' },
+  ],
+  newPassword: [
+    { required: true, message: '请输入新密码', trigger: 'blur' },
+    { min: 6, max: 20, message: '密码长度在 6 到 20 个字符', trigger: 'blur' },
+  ],
+  confirmPassword: [{ validator: validateConfirmPassword, trigger: 'blur' }],
+}
+
 const hydrateForm = (user: UserVO) => {
   currentUser.value = user
   form.username = user.username
@@ -73,17 +105,17 @@ const handleAvatarSuccess: UploadProps['onSuccess'] = (response, uploadFile) => 
     form.avatar = avatarUrl.trim()
     return
   }
-  ElMessage.error('头像上传响应异常，请重试')
+  feedback.error('头像上传响应异常，请重试')
 }
 
 const beforeAvatarUpload: UploadProps['beforeUpload'] = (rawFile) => {
   const allowedTypes = new Set(['image/jpeg', 'image/png', 'image/webp'])
   if (!allowedTypes.has(rawFile.type)) {
-    ElMessage.error('头像图片仅支持 JPG/JPEG、PNG、WEBP 格式')
+    feedback.error('头像图片仅支持 JPG/JPEG、PNG、WEBP 格式')
     return false
   }
   if (rawFile.size / 1024 / 1024 > 2) {
-    ElMessage.error('头像图片大小不能超过 2MB')
+    feedback.error('头像图片大小不能超过 2MB')
     return false
   }
   return true
@@ -95,8 +127,8 @@ const fetchProfile = async () => {
     const me = await userApi.getMe()
     authStore.setUser(me)
     hydrateForm(me)
-  } catch (error: any) {
-    ElMessage.error(error.message || '加载个人信息失败')
+  } catch (error) {
+    feedback.errorFrom(error, '加载个人信息失败')
   } finally {
     initLoading.value = false
   }
@@ -121,7 +153,7 @@ const handleSave = async () => {
     }
 
     if (!payload.username && !payload.avatar) {
-      ElMessage.info('未检测到变更')
+      feedback.info('未检测到变更')
       return
     }
 
@@ -130,13 +162,49 @@ const handleSave = async () => {
       const updated = await userApi.updateProfile(payload)
       authStore.setUser(updated)
       hydrateForm(updated)
-      ElMessage.success('保存成功')
-    } catch (error: any) {
-      ElMessage.error(error.message || '保存失败')
+      feedback.success('保存成功')
+    } catch (error) {
+      feedback.errorFrom(error, '保存失败')
     } finally {
       loading.value = false
     }
   })
+}
+
+const resetPasswordForm = () => {
+  passwordForm.currentPassword = ''
+  passwordForm.newPassword = ''
+  passwordForm.confirmPassword = ''
+  passwordFormRef.value?.clearValidate()
+}
+
+const handleChangePassword = async () => {
+  if (!passwordFormRef.value) return
+
+  const valid = await passwordFormRef.value
+    .validate()
+    .then(() => true)
+    .catch(() => false)
+
+  if (!valid) {
+    return
+  }
+
+  if (passwordForm.currentPassword === passwordForm.newPassword) {
+    feedback.warning('新密码不能与当前密码相同')
+    return
+  }
+
+  passwordLoading.value = true
+  try {
+    await userApi.changePassword(passwordForm.currentPassword, passwordForm.newPassword)
+    feedback.success('密码修改成功')
+    resetPasswordForm()
+  } catch (error) {
+    feedback.errorFrom(error, '修改密码失败')
+  } finally {
+    passwordLoading.value = false
+  }
 }
 
 onMounted(() => {
@@ -193,6 +261,44 @@ onBeforeUnmount(() => {
 
           <el-form-item>
             <el-button type="primary" :loading="loading" @click="handleSave">保存修改</el-button>
+          </el-form-item>
+        </el-form>
+
+        <el-divider content-position="left">安全设置</el-divider>
+
+        <el-form ref="passwordFormRef" :model="passwordForm" :rules="passwordRules" label-width="90px" class="profile-form">
+          <el-form-item label="当前密码" prop="currentPassword">
+            <el-input
+              v-model="passwordForm.currentPassword"
+              type="password"
+              show-password
+              maxlength="20"
+              autocomplete="current-password"
+            />
+          </el-form-item>
+
+          <el-form-item label="新密码" prop="newPassword">
+            <el-input
+              v-model="passwordForm.newPassword"
+              type="password"
+              show-password
+              maxlength="20"
+              autocomplete="new-password"
+            />
+          </el-form-item>
+
+          <el-form-item label="确认新密码" prop="confirmPassword">
+            <el-input
+              v-model="passwordForm.confirmPassword"
+              type="password"
+              show-password
+              maxlength="20"
+              autocomplete="new-password"
+            />
+          </el-form-item>
+
+          <el-form-item>
+            <el-button type="primary" :loading="passwordLoading" @click="handleChangePassword">修改密码</el-button>
           </el-form-item>
         </el-form>
       </el-card>

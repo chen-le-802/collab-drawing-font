@@ -1,4 +1,9 @@
-export type GraphicObjectType = 'line' | 'rect' | 'circle' | 'text'
+export type GraphicObjectType = 'line' | 'rect' | 'circle' | 'text' | 'path'
+
+export interface PathPoint {
+  x: number
+  y: number
+}
 
 // 与后端 graphic_objects 表一一对应的前端实体。
 export interface GraphicVO {
@@ -19,6 +24,7 @@ export interface GraphicVO {
   strokeWidth: number
   textContent: string | null
   fontSize: number | null
+  pathPoints: PathPoint[] | null
   zIndex: number
   version: number
   creatorId: number
@@ -39,6 +45,7 @@ export interface CreateGraphicDTO {
   zIndex: number
   textContent?: string
   fontSize?: number
+  pathPoints?: PathPoint[]
 }
 
 // 对齐约定：'obj_' + Date.now() + Math.random().toString(36).substr(2, 9)

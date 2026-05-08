@@ -64,7 +64,8 @@ const handleLeave = () => emit('leave', props.session)
 <template>
   <el-card class="session-card" shadow="hover" @click="handleOpen">
     <div class="thumbnail">
-      <div class="thumbnail-placeholder">
+      <img v-if="session.thumbnail" :src="session.thumbnail" :alt="`${session.name} 缩略图`" />
+      <div v-else class="thumbnail-placeholder">
         <span>画布缩略图</span>
       </div>
     </div>
