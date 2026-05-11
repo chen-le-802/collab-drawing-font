@@ -27,6 +27,10 @@ export interface LeaveSessionData {
 
 export interface CreateGraphicData {
   sessionKey: string
+  operationId?: string
+  clientId?: string
+  baseVersion?: number
+  lamportTime?: number
   objectKey: string
   objectType: 'line' | 'rect' | 'circle' | 'text' | 'path'
   positionX: number
@@ -44,7 +48,24 @@ export interface CreateGraphicData {
 
 export interface UpdateGraphicData {
   sessionKey: string
+  operationId?: string
+  clientId?: string
+  baseVersion?: number
+  lamportTime?: number
   objectKey: string
+  patch?: {
+    positionX?: number
+    positionY?: number
+    width?: number
+    height?: number
+    strokeColor?: string
+    fillColor?: string
+    strokeWidth?: number
+    zIndex?: number
+    textContent?: string
+    fontSize?: number
+    pathPoints?: Array<{ x: number; y: number }>
+  }
   positionX?: number
   positionY?: number
   width?: number
@@ -60,11 +81,19 @@ export interface UpdateGraphicData {
 
 export interface DeleteGraphicData {
   sessionKey: string
+  operationId?: string
+  clientId?: string
+  baseVersion?: number
+  lamportTime?: number
   objectKey: string
 }
 
 export interface UndoRedoData {
   sessionKey: string
+  operationId?: string
+  clientId?: string
+  baseVersion?: number
+  lamportTime?: number
 }
 
 export type ServerMessageType =
@@ -76,6 +105,7 @@ export type ServerMessageType =
   | 'graphic_created'
   | 'graphic_updated'
   | 'graphic_deleted'
+  | 'operation_resolved'
   | 'undo_result'
   | 'redo_result'
   | 'error'
@@ -136,6 +166,17 @@ export interface GraphicDeletedData {
   currentVersion: number
 }
 
+export interface OperationResolvedData {
+  operationId: string
+  objectKey: string
+  operationType: OperationType
+  serverVersion: number
+  conflictType: 'none' | 'field_merge' | 'field_conflict' | 'delete_wins' | 'duplicate_operation'
+  appliedFields: string[]
+  rejectedFields: string[]
+  resolveReason: string
+}
+
 export type OperationType = 'create_graphic' | 'update_graphic' | 'delete_graphic'
 
 export interface OperationVO {
@@ -188,6 +229,7 @@ export type ServerMessageDataMap = {
   graphic_created: GraphicCreatedData
   graphic_updated: GraphicUpdatedData
   graphic_deleted: GraphicDeletedData
+  operation_resolved: OperationResolvedData
   undo_result: UndoResultData
   redo_result: RedoResultData
   error: WsErrorData

@@ -46,6 +46,7 @@ const SERVER_MESSAGE_TYPES: ReadonlySet<ServerMessageType> = new Set([
   'graphic_created',
   'graphic_updated',
   'graphic_deleted',
+  'operation_resolved',
   'undo_result',
   'redo_result',
   'error',
@@ -282,14 +283,26 @@ export class WebSocketClient {
     this.send('delete_graphic', payload)
   }
 
+  sendDeleteGraphicWithMeta(data: DeleteGraphicData): void {
+    this.send('delete_graphic', data)
+  }
+
   sendUndo(sessionKey: string): void {
     const payload: UndoRedoData = { sessionKey }
     this.send('undo', payload)
   }
 
+  sendUndoWithMeta(data: UndoRedoData): void {
+    this.send('undo', data)
+  }
+
   sendRedo(sessionKey: string): void {
     const payload: UndoRedoData = { sessionKey }
     this.send('redo', payload)
+  }
+
+  sendRedoWithMeta(data: UndoRedoData): void {
+    this.send('redo', data)
   }
 
   isConnected(): boolean {
@@ -427,6 +440,8 @@ export class WebSocketClient {
         return this.normalizeGraphicUpdated(data) as ServerMessageDataMap[K]
       case 'graphic_deleted':
         return this.normalizeGraphicDeleted(data) as ServerMessageDataMap[K]
+      case 'operation_resolved':
+        return this.normalizeOperationResolved(data) as ServerMessageDataMap[K]
       case 'undo_result':
         return this.normalizeUndoResult(data) as ServerMessageDataMap[K]
       case 'redo_result':
@@ -514,6 +529,39 @@ export class WebSocketClient {
       userId: toNumber(record.userId),
       objectKey: toString(record.objectKey),
       currentVersion: toNumber(record.currentVersion),
+    }
+  }
+
+  private normalizeOperationResolved(data: unknown) {
+    const record = isObject(data) ? data : {}
+    const conflictTypeRaw = toString(record.conflictType, 'none')
+    const conflictType =
+      conflictTypeRaw === 'field_merge' ||
+      conflictTypeRaw === 'field_conflict' ||
+      conflictTypeRaw === 'delete_wins' ||
+      conflictTypeRaw === 'duplicate_operation'
+        ? conflictTypeRaw
+        : 'none'
+    const operationTypeRaw = toString(record.operationType, 'update_graphic')
+    const operationType =
+      operationTypeRaw === 'create_graphic' ||
+      operationTypeRaw === 'update_graphic' ||
+      operationTypeRaw === 'delete_graphic'
+        ? operationTypeRaw
+        : 'update_graphic'
+    return {
+      operationId: toString(record.operationId),
+      objectKey: toString(record.objectKey),
+      operationType,
+      serverVersion: toNumber(record.serverVersion),
+      conflictType,
+      appliedFields: Array.isArray(record.appliedFields)
+        ? record.appliedFields.map((item) => toString(item)).filter((item) => item.length > 0)
+        : [],
+      rejectedFields: Array.isArray(record.rejectedFields)
+        ? record.rejectedFields.map((item) => toString(item)).filter((item) => item.length > 0)
+        : [],
+      resolveReason: toString(record.resolveReason),
     }
   }
 

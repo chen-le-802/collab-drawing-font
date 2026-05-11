@@ -84,29 +84,39 @@ const onCustomColorChange = (event: Event) => {
 }
 
 .color-item {
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
   border: 2px solid transparent;
   cursor: pointer;
+  transition: transform var(--cd-transition), box-shadow var(--cd-transition);
+}
+
+.color-item:hover {
+  transform: scale(1.15);
 }
 
 .color-item.active {
-  border-color: #111827;
+  border-color: var(--cd-text-primary);
+  box-shadow: 0 0 0 2px var(--cd-primary-light);
 }
 
 .transparent-item {
-  background: repeating-linear-gradient(45deg, #d1d5db 0 4px, #f3f4f6 4px 8px);
-  color: #111827;
+  background: repeating-conic-gradient(#d1d5db 0% 25%, #f3f4f6 0% 50%) 50% / 10px 10px;
+  color: var(--cd-text-primary);
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .custom-color input {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border: none;
   padding: 0;
   background: transparent;
   cursor: pointer;
+  border-radius: 50%;
 }
 </style>

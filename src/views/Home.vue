@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import AppHeader from '@/components/layout/AppHeader.vue'
 import SessionCard from '@/components/session/SessionCard.vue'
 import SessionCreate from '@/views/SessionCreate.vue'
 import { graphicApi } from '@/api/graphic'
@@ -376,7 +375,7 @@ const handleDeleteSession = async (_session: SessionVO) => {
 const handleLeaveSession = async (session: SessionVO) => {
   try {
     const confirmed = await confirmDanger(
-      '退出后将从“我加入的会话”中移除，但你仍可通过邀请链接再次加入。是否继续？',
+      '退出后将从”我加入的会话”中移除，但你仍可通过邀请链接再次加入。是否继续？',
       '退出会话确认',
       {
         confirmButtonText: '确认退出',
@@ -391,6 +390,16 @@ const handleLeaveSession = async (session: SessionVO) => {
   } catch (error) {
     feedback.errorFrom(error, '退出会话失败')
   }
+}
+
+const handleLogout = async () => {
+  try {
+    await userApi.logout()
+  } catch {
+    // ignore
+  }
+  authStore.logout()
+  router.push('/login')
 }
 
 const isSessionCreator = (session: SessionVO): boolean => {
@@ -435,67 +444,99 @@ watch(
 
 <template>
   <div class="home-page">
-    <app-header />
-
-    <main class="content">
-      <aside class="create-side">
-        <el-card class="create-card" shadow="hover" @click="openCreateDialog">
-          <div class="create-inner">
-            <div class="create-icon">+</div>
-            <p class="create-title">创建新会话</p>
-          </div>
-        </el-card>
-      </aside>
-
-      <section class="session-side">
-        <div class="session-header">
-          <h2 class="session-title">{{ listTitle }}</h2>
-          <div class="session-tools">
-            <el-input
-              v-model="searchKeyword"
-              size="small"
-              clearable
-              placeholder="搜索会话名/创建者/Key"
-              class="search-input"
-            />
-            <el-select v-model="sortBy" size="small" class="sort-select">
-              <el-option label="最近创建" value="created_desc" />
-              <el-option label="最早创建" value="created_asc" />
-              <el-option label="名称 A-Z" value="name_asc" />
-              <el-option label="名称 Z-A" value="name_desc" />
-              <el-option label="版本号高到低" value="version_desc" />
-            </el-select>
-          </div>
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="sidebar-logo" @click="$router.push('/')">
+          <span class="logo-mark">CD</span>
+          <span class="logo-text">Collab Drawing</span>
         </div>
 
-        <el-skeleton :loading="loading" animated :count="3">
-          <template #template>
-            <div class="session-grid">
-              <el-card v-for="item in 3" :key="item" class="skeleton-card">
-                <el-skeleton-item variant="image" style="height: 90px" />
-                <el-skeleton-item variant="h3" style="margin-top: 12px; width: 70%" />
-                <el-skeleton-item variant="text" style="margin-top: 8px; width: 90%" />
-              </el-card>
+        <nav class="sidebar-nav">
+          <router-link to="/" class="nav-item" :class="{ active: !isMyCreatedTab }">
+            <span class="nav-icon">&#9776;</span>
+            <span>我加入的会话</span>
+          </router-link>
+          <router-link to="/my-sessions" class="nav-item" :class="{ active: isMyCreatedTab }">
+            <span class="nav-icon">&#9733;</span>
+            <span>我创建的会话</span>
+          </router-link>
+        </nav>
+
+        <button class="create-btn" @click="openCreateDialog">
+          <span class="create-btn-icon">+</span>
+          创建新会话
+        </button>
+      </div>
+
+      <div class="sidebar-bottom">
+        <div class="user-info" @click="$router.push('/profile')">
+          <el-avatar :size="36" :src="authStore.user?.avatar" class="user-avatar">
+            {{ (authStore.user?.username ?? 'U').slice(0, 1).toUpperCase() }}
+          </el-avatar>
+          <div class="user-meta">
+            <div class="user-name">{{ authStore.user?.username ?? '用户' }}</div>
+            <div class="user-role">个人中心</div>
+          </div>
+        </div>
+        <button class="logout-btn" @click="handleLogout" title="退出登录">&#x23FB;</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <div class="main-header">
+        <h2 class="main-title">{{ listTitle }}</h2>
+        <div class="main-tools">
+          <div class="search-box">
+            <span class="search-icon">&#128269;</span>
+            <input
+              v-model="searchKeyword"
+              class="search-input"
+              placeholder="搜索会话名 / 创建者 / Key"
+            />
+          </div>
+          <el-select v-model="sortBy" size="small" class="sort-select">
+            <el-option label="最近创建" value="created_desc" />
+            <el-option label="最早创建" value="created_asc" />
+            <el-option label="名称 A-Z" value="name_asc" />
+            <el-option label="名称 Z-A" value="name_desc" />
+            <el-option label="版本号高到低" value="version_desc" />
+          </el-select>
+        </div>
+      </div>
+
+      <el-skeleton :loading="loading" animated :count="3">
+        <template #template>
+          <div class="session-grid">
+            <div v-for="item in 6" :key="item" class="skeleton-card">
+              <div class="skeleton-thumb"></div>
+              <div class="skeleton-line skeleton-line-short"></div>
+              <div class="skeleton-line"></div>
             </div>
-          </template>
-          <template #default>
-            <el-empty v-if="displayedSessions.length === 0" :description="emptyDisplayText" />
-            <div v-else class="session-grid">
-              <session-card
-                v-for="session in displayedSessions"
-                :key="session.sessionKey"
-                :session="session"
-                :is-creator="isSessionCreator(session)"
-                @open="handleOpenSession"
-                @copy="handleCopyLink"
-                @delete="handleDeleteSession"
-                @leave="handleLeaveSession"
-              />
-            </div>
-          </template>
-        </el-skeleton>
-      </section>
+          </div>
+        </template>
+        <template #default>
+          <div v-if="displayedSessions.length === 0" class="empty-state">
+            <div class="empty-icon">&#128196;</div>
+            <p class="empty-text">{{ emptyDisplayText }}</p>
+          </div>
+          <div v-else class="session-grid">
+            <session-card
+              v-for="session in displayedSessions"
+              :key="session.sessionKey"
+              :session="session"
+              :is-creator="isSessionCreator(session)"
+              @open="handleOpenSession"
+              @copy="handleCopyLink"
+              @delete="handleDeleteSession"
+              @leave="handleLeaveSession"
+            />
+          </div>
+        </template>
+      </el-skeleton>
     </main>
+
+    <div class="decor-circle decor-circle-1"></div>
+    <div class="decor-circle decor-circle-2"></div>
 
     <session-create v-model="createVisible" @created="handleSessionCreated" />
   </div>
@@ -504,133 +545,388 @@ watch(
 <style scoped>
 .home-page {
   min-height: 100vh;
-  background: #f5f7fb;
-}
-
-.content {
   display: flex;
-  align-items: flex-start;
-  gap: 24px;
-  padding: 24px;
+  background: var(--cd-bg-page);
+  position: relative;
+  overflow: hidden;
 }
 
-.create-side {
-  width: 200px;
-  flex: 0 0 200px;
+.decor-circle {
+  position: fixed;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
 }
 
-.create-card {
-  width: 200px;
-  height: 200px;
-  border-radius: 8px;
-  cursor: pointer;
+.decor-circle-1 {
+  width: 600px;
+  height: 600px;
+  top: -200px;
+  right: -150px;
+  background: radial-gradient(circle, rgba(248, 200, 220, 0.3) 0%, transparent 70%);
 }
 
-:deep(.create-card .el-card__body) {
-  height: 100%;
+.decor-circle-2 {
+  width: 450px;
+  height: 450px;
+  bottom: -180px;
+  left: 200px;
+  background: radial-gradient(circle, rgba(196, 181, 253, 0.18) 0%, transparent 70%);
 }
 
-.create-inner {
-  width: 100%;
-  height: 100%;
+/* Sidebar */
+.sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  background: var(--cd-bg-card);
+  border-radius: 0 var(--cd-radius-xl) var(--cd-radius-xl) 0;
+  box-shadow: var(--cd-shadow-md);
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
+  justify-content: space-between;
+  padding: 24px 18px;
+  position: relative;
+  z-index: 2;
 }
 
-.create-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 999px;
-  background: #2d72ff;
+.sidebar-top {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.sidebar-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.logo-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
   color: #ffffff;
-  font-size: 28px;
-  line-height: 48px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.logo-text {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--cd-text-primary);
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--cd-radius-md);
+  font-size: 14px;
+  color: var(--cd-text-secondary);
+  text-decoration: none;
+  transition: background var(--cd-transition), color var(--cd-transition);
+}
+
+.nav-item:hover {
+  background: var(--cd-primary-lighter);
+  color: var(--cd-text-primary);
+}
+
+.nav-item.active {
+  background: var(--cd-primary-light);
+  color: var(--cd-primary);
+  font-weight: 600;
+}
+
+.nav-icon {
+  font-size: 16px;
+  width: 20px;
   text-align: center;
 }
 
-.create-title {
-  color: #1f2d3d;
-  font-size: 15px;
+.create-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 44px;
+  border: none;
+  border-radius: var(--cd-radius-md);
+  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
+  color: #ffffff;
+  font-size: 14px;
   font-weight: 600;
+  cursor: pointer;
+  transition: opacity var(--cd-transition), transform var(--cd-transition);
 }
 
-.session-side {
+.create-btn:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
+.create-btn-icon {
+  font-size: 18px;
+  font-weight: 300;
+}
+
+.sidebar-bottom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 8px;
+  border-top: 1px solid var(--cd-border);
+}
+
+.user-info {
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  border-radius: var(--cd-radius-sm);
+  padding: 4px;
+  transition: background var(--cd-transition);
+}
+
+.user-info:hover {
+  background: var(--cd-primary-lighter);
+}
+
+.user-avatar {
+  background: var(--cd-primary-light);
+  color: var(--cd-primary);
+  font-weight: 700;
+}
+
+.user-meta {
   min-width: 0;
 }
 
-.session-header {
-  margin-bottom: 16px;
+.user-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--cd-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-role {
+  font-size: 11px;
+  color: var(--cd-text-muted);
+}
+
+.logout-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--cd-radius-sm);
+  background: transparent;
+  color: var(--cd-text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  transition: background var(--cd-transition), color var(--cd-transition);
+}
+
+.logout-btn:hover {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+/* Main content */
+.main-content {
+  flex: 1;
+  min-width: 0;
+  padding: 32px 36px;
+  position: relative;
+  z-index: 1;
+}
+
+.main-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
+  margin-bottom: 28px;
   flex-wrap: wrap;
 }
 
-.session-title {
+.main-title {
   margin: 0;
-  font-size: 20px;
-  color: #1f2d3d;
-  font-weight: 600;
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--cd-text-primary);
 }
 
-.session-tools {
+.main-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.search-box {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 0 14px;
+  height: 36px;
+  background: var(--cd-bg-card);
+  border-radius: 20px;
+  box-shadow: var(--cd-shadow-sm);
+  border: 1px solid var(--cd-border);
+  transition: border-color var(--cd-transition), box-shadow var(--cd-transition);
+}
+
+.search-box:focus-within {
+  border-color: var(--cd-primary);
+  box-shadow: 0 0 0 3px rgba(79, 110, 247, 0.08);
+}
+
+.search-icon {
+  font-size: 14px;
+  opacity: 0.5;
 }
 
 .search-input {
-  width: 220px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  width: 200px;
+  color: var(--cd-text-primary);
+}
+
+.search-input::placeholder {
+  color: var(--cd-text-muted);
 }
 
 .sort-select {
-  width: 140px;
+  width: 130px;
+}
+
+:deep(.sort-select .el-input__wrapper) {
+  border-radius: 20px;
+  box-shadow: var(--cd-shadow-sm);
 }
 
 .session-grid {
   display: grid;
-  grid-template-columns: repeat(3, 280px);
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 24px;
 }
 
 .skeleton-card {
-  width: 280px;
-  height: 200px;
-  border-radius: 8px;
+  background: var(--cd-bg-card);
+  border-radius: var(--cd-radius-lg);
+  padding: 14px;
+  box-shadow: var(--cd-shadow-sm);
 }
 
-@media (max-width: 1360px) {
-  .session-grid {
-    grid-template-columns: repeat(2, 280px);
-  }
+.skeleton-thumb {
+  height: 110px;
+  border-radius: var(--cd-radius-md);
+  background: linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
 }
 
-@media (max-width: 1000px) {
-  .content {
+.skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+  background: #f0f0f0;
+  margin-top: 12px;
+  width: 90%;
+}
+
+.skeleton-line-short {
+  width: 60%;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 20px;
+  text-align: center;
+}
+
+.empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.4;
+}
+
+.empty-text {
+  font-size: 15px;
+  color: var(--cd-text-muted);
+  margin: 0;
+}
+
+@media (max-width: 900px) {
+  .home-page {
     flex-direction: column;
   }
 
-  .create-side {
+  .sidebar {
     width: 100%;
+    border-radius: 0 0 var(--cd-radius-xl) var(--cd-radius-xl);
+    padding: 16px;
+    flex-direction: row;
+    align-items: center;
   }
 
-  .create-card {
-    width: 100%;
-    max-width: 280px;
+  .sidebar-top {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+  }
+
+  .sidebar-nav {
+    flex-direction: row;
+  }
+
+  .sidebar-bottom {
+    border-top: none;
+    padding: 0;
+  }
+
+  .user-meta {
+    display: none;
+  }
+
+  .main-content {
+    padding: 20px 16px;
   }
 
   .session-grid {
-    grid-template-columns: repeat(1, 280px);
+    grid-template-columns: 1fr;
   }
 
-  .search-input,
-  .sort-select {
-    width: 100%;
+  .search-input {
+    width: 140px;
   }
 }
 </style>

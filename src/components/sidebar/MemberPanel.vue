@@ -156,15 +156,19 @@ const canTransferCreator = (member: MemberVO) => {
 
 <style scoped>
 .member-panel {
-  width: 200px;
-  border-left: 1px solid #e5e7eb;
-  background: #ffffff;
+  width: 210px;
+  margin: 10px 10px 10px 0;
+  background: var(--cd-bg-card);
+  border-radius: var(--cd-radius-lg);
+  box-shadow: var(--cd-shadow-md);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .member-panel.collapsed {
-  width: 40px;
+  width: 44px;
+  border-radius: var(--cd-radius-md);
 }
 
 .panel-header {
@@ -172,8 +176,8 @@ const canTransferCreator = (member: MemberVO) => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid #e5e7eb;
-  padding: 0 8px;
+  border-bottom: 1px solid var(--cd-border);
+  padding: 0 10px;
 }
 
 .title-wrap {
@@ -183,12 +187,14 @@ const canTransferCreator = (member: MemberVO) => {
 }
 
 .title {
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 600;
   margin: 0;
+  color: var(--cd-text-primary);
 }
 
 .history-switch {
-  --el-switch-on-color: #409eff;
+  --el-switch-on-color: var(--cd-primary);
   --el-switch-off-color: #d1d5db;
 }
 
@@ -199,19 +205,23 @@ const canTransferCreator = (member: MemberVO) => {
 .member-list {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .member-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px;
-  border-radius: 8px;
-  background: #f8fafc;
+  padding: 8px 10px;
+  border-radius: var(--cd-radius-md);
+  transition: background var(--cd-transition);
+}
+
+.member-item:hover {
+  background: var(--cd-primary-lighter);
 }
 
 .meta {
@@ -221,7 +231,8 @@ const canTransferCreator = (member: MemberVO) => {
 
 .name {
   font-size: 13px;
-  color: #111827;
+  color: var(--cd-text-primary);
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -231,18 +242,20 @@ const canTransferCreator = (member: MemberVO) => {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 12px;
-  color: #6b7280;
+  font-size: 11px;
+  color: var(--cd-text-muted);
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 999px;
 }
 
 .dot-online {
   background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+  animation: pulse-green 2s infinite;
 }
 
 .dot-offline {
@@ -257,11 +270,16 @@ const canTransferCreator = (member: MemberVO) => {
   background: #ef4444;
 }
 
+@keyframes pulse-green {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 .empty {
   font-size: 12px;
-  color: #9ca3af;
+  color: var(--cd-text-muted);
   text-align: center;
-  padding: 16px 0;
+  padding: 20px 0;
 }
 
 .actions {

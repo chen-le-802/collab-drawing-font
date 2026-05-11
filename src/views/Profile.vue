@@ -3,7 +3,6 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import type { UploadProps } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
-import AppHeader from '@/components/layout/AppHeader.vue'
 import { userApi } from '@/api/user'
 import { useAuthStore } from '@/stores/auth'
 import type { UpdateProfileDTO, UserVO } from '@/types/user'
@@ -221,87 +220,98 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="profile-page">
-    <app-header />
+    <header class="profile-header">
+      <div class="header-left" @click="$router.push('/')">
+        <span class="header-logo">CD</span>
+        <span class="header-title">Collab Drawing</span>
+      </div>
+      <button class="back-btn" @click="$router.push('/')">&#8592; 返回首页</button>
+    </header>
 
-    <main class="profile-content" v-loading="initLoading">
-      <el-card class="profile-card">
-        <template #header>
-          <div class="profile-title">个人中心</div>
-        </template>
-
-        <div class="profile-meta">
-          <el-avatar :size="72" :src="avatarPreview">{{ form.username.slice(0, 1).toUpperCase() }}</el-avatar>
-          <div class="profile-meta-text">
-            <div class="meta-row"><span>当前用户名：</span>{{ currentUser?.username || '-' }}</div>
-            <div class="meta-row"><span>注册时间：</span>{{ registerTimeText }}</div>
+    <main class="profile-body" v-loading="initLoading">
+      <div class="profile-banner">
+        <div class="banner-circle"></div>
+        <div class="banner-content">
+          <el-avatar :size="80" :src="avatarPreview" class="banner-avatar">
+            {{ form.username.slice(0, 1).toUpperCase() }}
+          </el-avatar>
+          <div class="banner-info">
+            <h2 class="banner-name">{{ currentUser?.username || '用户' }}</h2>
+            <p class="banner-time">注册于 {{ registerTimeText }}</p>
           </div>
         </div>
+      </div>
 
-        <el-form ref="formRef" :model="form" :rules="rules" label-width="90px" class="profile-form">
-          <el-form-item label="用户名" prop="username">
-            <el-input v-model="form.username" maxlength="20" show-word-limit />
-          </el-form-item>
+      <div class="profile-sections">
+        <section class="section-card">
+          <h3 class="section-title">基本信息</h3>
+          <el-form ref="formRef" :model="form" :rules="rules" label-width="90px" class="profile-form">
+            <el-form-item label="用户名" prop="username">
+              <el-input v-model="form.username" maxlength="20" show-word-limit />
+            </el-form-item>
 
-          <el-form-item label="上传头像">
-            <el-upload
-              class="avatar-uploader"
-              :action="uploadAvatarAction"
-              :headers="uploadAvatarHeaders"
-              accept="image/jpeg,image/png,image/webp"
-              name="file"
-              :show-file-list="false"
-              :on-success="handleAvatarSuccess"
-              :before-upload="beforeAvatarUpload"
-            >
-              <img v-if="avatarPreview" :src="avatarPreview" class="avatar" />
-              <el-icon v-else class="avatar-uploader-icon"><Plus /></el-icon>
-            </el-upload>
-            <div class="upload-tip">支持 JPG/JPEG、PNG、WEBP 格式，且文件大小不超过 2MB</div>
-          </el-form-item>
+            <el-form-item label="上传头像">
+              <el-upload
+                class="avatar-uploader"
+                :action="uploadAvatarAction"
+                :headers="uploadAvatarHeaders"
+                accept="image/jpeg,image/png,image/webp"
+                name="file"
+                :show-file-list="false"
+                :on-success="handleAvatarSuccess"
+                :before-upload="beforeAvatarUpload"
+              >
+                <img v-if="avatarPreview" :src="avatarPreview" class="avatar" />
+                <el-icon v-else class="avatar-uploader-icon"><Plus /></el-icon>
+              </el-upload>
+              <div class="upload-tip">支持 JPG/JPEG、PNG、WEBP 格式，且文件大小不超过 2MB</div>
+            </el-form-item>
 
-          <el-form-item>
-            <el-button type="primary" :loading="loading" @click="handleSave">保存修改</el-button>
-          </el-form-item>
-        </el-form>
+            <el-form-item>
+              <el-button type="primary" :loading="loading" @click="handleSave">保存修改</el-button>
+            </el-form-item>
+          </el-form>
+        </section>
 
-        <el-divider content-position="left">安全设置</el-divider>
+        <section class="section-card">
+          <h3 class="section-title">安全设置</h3>
+          <el-form ref="passwordFormRef" :model="passwordForm" :rules="passwordRules" label-width="90px" class="profile-form">
+            <el-form-item label="当前密码" prop="currentPassword">
+              <el-input
+                v-model="passwordForm.currentPassword"
+                type="password"
+                show-password
+                maxlength="20"
+                autocomplete="current-password"
+              />
+            </el-form-item>
 
-        <el-form ref="passwordFormRef" :model="passwordForm" :rules="passwordRules" label-width="90px" class="profile-form">
-          <el-form-item label="当前密码" prop="currentPassword">
-            <el-input
-              v-model="passwordForm.currentPassword"
-              type="password"
-              show-password
-              maxlength="20"
-              autocomplete="current-password"
-            />
-          </el-form-item>
+            <el-form-item label="新密码" prop="newPassword">
+              <el-input
+                v-model="passwordForm.newPassword"
+                type="password"
+                show-password
+                maxlength="20"
+                autocomplete="new-password"
+              />
+            </el-form-item>
 
-          <el-form-item label="新密码" prop="newPassword">
-            <el-input
-              v-model="passwordForm.newPassword"
-              type="password"
-              show-password
-              maxlength="20"
-              autocomplete="new-password"
-            />
-          </el-form-item>
+            <el-form-item label="确认新密码" prop="confirmPassword">
+              <el-input
+                v-model="passwordForm.confirmPassword"
+                type="password"
+                show-password
+                maxlength="20"
+                autocomplete="new-password"
+              />
+            </el-form-item>
 
-          <el-form-item label="确认新密码" prop="confirmPassword">
-            <el-input
-              v-model="passwordForm.confirmPassword"
-              type="password"
-              show-password
-              maxlength="20"
-              autocomplete="new-password"
-            />
-          </el-form-item>
-
-          <el-form-item>
-            <el-button type="primary" :loading="passwordLoading" @click="handleChangePassword">修改密码</el-button>
-          </el-form-item>
-        </el-form>
-      </el-card>
+            <el-form-item>
+              <el-button type="primary" :loading="passwordLoading" @click="handleChangePassword">修改密码</el-button>
+            </el-form-item>
+          </el-form>
+        </section>
+      </div>
     </main>
   </div>
 </template>
@@ -309,98 +319,200 @@ onBeforeUnmount(() => {
 <style scoped>
 .profile-page {
   min-height: 100vh;
-  background: #f5f7fb;
+  background: var(--cd-bg-page);
 }
 
-.profile-content {
-  padding: 24px;
-  display: flex;
-  justify-content: center;
-}
-
-.profile-card {
-  width: 100%;
-  max-width: 760px;
-  border-radius: 12px;
-}
-
-.profile-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: #1f2d3d;
-}
-
-.profile-meta {
-  margin-bottom: 24px;
+.profile-header {
+  height: 60px;
+  padding: 0 28px;
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 14px;
-  border-radius: 10px;
-  background: #f7faff;
+  justify-content: space-between;
+  background: var(--cd-bg-card);
+  box-shadow: var(--cd-shadow-sm);
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 
-.profile-meta-text {
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.header-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.header-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--cd-text-primary);
+}
+
+.back-btn {
+  border: 1px solid var(--cd-border);
+  border-radius: var(--cd-radius-sm);
+  background: var(--cd-bg-card);
+  padding: 6px 16px;
+  font-size: 13px;
+  color: var(--cd-text-secondary);
+  cursor: pointer;
+  transition: border-color var(--cd-transition), color var(--cd-transition);
+}
+
+.back-btn:hover {
+  border-color: var(--cd-primary);
+  color: var(--cd-primary);
+}
+
+.profile-body {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 32px 24px;
+}
+
+.profile-banner {
+  position: relative;
+  height: 160px;
+  border-radius: var(--cd-radius-xl);
+  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 50%, #a78bfa 100%);
+  overflow: hidden;
+  margin-bottom: 60px;
+}
+
+.banner-circle {
+  position: absolute;
+  width: 300px;
+  height: 300px;
+  border-radius: 50%;
+  top: -100px;
+  right: -50px;
+  background: radial-gradient(circle, rgba(248, 200, 220, 0.3) 0%, transparent 70%);
+}
+
+.banner-content {
+  position: absolute;
+  bottom: -40px;
+  left: 32px;
+  display: flex;
+  align-items: flex-end;
+  gap: 18px;
+}
+
+.banner-avatar {
+  border: 4px solid var(--cd-bg-card);
+  box-shadow: var(--cd-shadow-md);
+  background: var(--cd-primary-light);
+  color: var(--cd-primary);
+  font-weight: 700;
+  font-size: 28px;
+}
+
+.banner-info {
+  padding-bottom: 6px;
+}
+
+.banner-name {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--cd-text-primary);
+  margin: 0;
+}
+
+.banner-time {
+  font-size: 13px;
+  color: var(--cd-text-muted);
+  margin: 4px 0 0;
+}
+
+.profile-sections {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  color: #3c4b63;
+  gap: 24px;
 }
 
-.meta-row span {
-  color: #7b8797;
+.section-card {
+  background: var(--cd-bg-card);
+  border-radius: var(--cd-radius-lg);
+  box-shadow: var(--cd-shadow-sm);
+  padding: 28px 32px;
+}
+
+.section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--cd-text-primary);
+  margin: 0 0 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--cd-border);
 }
 
 .profile-form {
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 .avatar-uploader .avatar {
-  width: 178px;
-  height: 178px;
+  width: 120px;
+  height: 120px;
   display: block;
   object-fit: cover;
+  border-radius: 50%;
 }
 
 .upload-tip {
-  margin-top: 8px;
-  color: #7b8797;
+  margin-top: 10px;
+  color: var(--cd-text-muted);
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.5;
 }
 
-@media (max-width: 900px) {
-  .profile-content {
-    padding: 16px;
+@media (max-width: 640px) {
+  .profile-body {
+    padding: 20px 12px;
   }
 
-  .profile-meta {
-    align-items: flex-start;
-    flex-direction: column;
+  .section-card {
+    padding: 20px 16px;
+  }
+
+  .banner-content {
+    left: 16px;
   }
 }
 </style>
 
 <style>
 .avatar-uploader .el-upload {
-  border: 1px dashed var(--el-border-color);
-  border-radius: 6px;
+  border: 2px dashed var(--cd-border);
+  border-radius: 50%;
   cursor: pointer;
   position: relative;
   overflow: hidden;
-  transition: var(--el-transition-duration-fast);
+  transition: border-color var(--cd-transition);
 }
 
 .avatar-uploader .el-upload:hover {
-  border-color: var(--el-color-primary);
+  border-color: var(--cd-primary);
 }
 
 .avatar-uploader-icon {
   font-size: 28px;
-  color: #8c939d;
-  width: 178px;
-  height: 178px;
+  color: var(--cd-text-muted);
+  width: 120px;
+  height: 120px;
   text-align: center;
-  line-height: 178px;
+  line-height: 120px;
 }
 </style>

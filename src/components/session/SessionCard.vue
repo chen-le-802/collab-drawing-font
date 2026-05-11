@@ -117,24 +117,30 @@ const handleLeave = () => emit('leave', props.session)
 
 <style scoped>
 .session-card {
-  width: 280px;
-  height: 200px;
-  border-radius: 8px;
+  border-radius: var(--cd-radius-lg);
   position: relative;
   overflow: hidden;
   cursor: pointer;
+  border: none;
+  box-shadow: var(--cd-shadow-sm);
+  transition: box-shadow var(--cd-transition), transform var(--cd-transition);
+}
+
+.session-card:hover {
+  box-shadow: var(--cd-shadow-md);
+  transform: translateY(-3px);
 }
 
 :deep(.session-card .el-card__body) {
   height: 100%;
-  padding: 12px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
 }
 
 .thumbnail {
-  height: 92px;
-  border-radius: 6px;
+  height: 110px;
+  border-radius: var(--cd-radius-md);
   overflow: hidden;
   background: #eef3ff;
 }
@@ -151,16 +157,16 @@ const handleLeave = () => emit('leave', props.session)
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #7f8ea3;
-  background: linear-gradient(120deg, #dfe8ff 0%, #edf2ff 100%);
+  color: var(--cd-text-muted);
+  background: linear-gradient(135deg, #eef2ff 0%, #f5f3ff 100%);
   font-size: 13px;
 }
 
 .content {
-  margin-top: 10px;
+  margin-top: 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .top-row {
@@ -173,7 +179,7 @@ const handleLeave = () => emit('leave', props.session)
 .name {
   margin: 0;
   font-size: 15px;
-  color: #1f2d3d;
+  color: var(--cd-text-primary);
   font-weight: 600;
   overflow: hidden;
   white-space: nowrap;
@@ -187,7 +193,7 @@ const handleLeave = () => emit('leave', props.session)
 }
 
 .creator {
-  color: #7f8ea3;
+  color: var(--cd-text-muted);
   font-size: 12px;
   overflow: hidden;
   white-space: nowrap;
@@ -195,12 +201,12 @@ const handleLeave = () => emit('leave', props.session)
 }
 
 .extra-members {
-  color: #7f8ea3;
+  color: var(--cd-text-muted);
   font-size: 12px;
 }
 
 .member-count {
-  color: #7f8ea3;
+  color: var(--cd-text-muted);
   font-size: 12px;
 }
 
@@ -215,25 +221,25 @@ const handleLeave = () => emit('leave', props.session)
 }
 
 .time {
-  color: #909399;
+  color: var(--cd-text-muted);
   font-size: 12px;
 }
 
 .online-count {
-  color: #5f6f85;
+  color: var(--cd-text-secondary);
   font-size: 12px;
 }
 
 .actions {
   position: absolute;
-  top: 8px;
-  right: 8px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  top: 10px;
+  right: 10px;
+  padding: 4px 8px;
+  border-radius: var(--cd-radius-sm);
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: var(--cd-shadow-md);
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity var(--cd-transition);
 }
 
 .session-card:hover .actions {

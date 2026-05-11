@@ -3,7 +3,7 @@ import { defineStore } from 'pinia'
 
 import type { GraphicVO } from '@/types/graphic'
 import type { SessionJoinVO } from '@/types/session'
-import type { OperationVO, RedoResultData, UndoResultData } from '@/ws/types'
+import type { OperationVO, RedoResultData, UndoRedoData, UndoResultData } from '@/ws/types'
 import type WebSocketClient from '@/ws/client'
 
 export interface UndoRedoState {
@@ -225,15 +225,29 @@ export const useCanvasStore = defineStore('canvas', () => {
     redoStack.value = []
   }
 
-  const undo = async () => {
+  const undo = async (meta?: Omit<UndoRedoData, 'sessionKey'>) => {
     if (!wsClient.value?.isConnected() || !currentSession.value || !canUndo.value) {
+      return
+    }
+    if (meta) {
+      wsClient.value.sendUndoWithMeta({
+        sessionKey: currentSession.value.sessionKey,
+        ...meta,
+      })
       return
     }
     wsClient.value.sendUndo(currentSession.value.sessionKey)
   }
 
-  const redo = async () => {
+  const redo = async (meta?: Omit<UndoRedoData, 'sessionKey'>) => {
     if (!wsClient.value?.isConnected() || !currentSession.value || !canRedo.value) {
+      return
+    }
+    if (meta) {
+      wsClient.value.sendRedoWithMeta({
+        sessionKey: currentSession.value.sessionKey,
+        ...meta,
+      })
       return
     }
     wsClient.value.sendRedo(currentSession.value.sessionKey)

@@ -12,7 +12,17 @@ import { userApi } from '@/api/user'
 import { useAuthStore } from '@/stores/auth'
 import { useCanvasStore } from '@/stores/canvas'
 import { generateGraphicObjectKey, type GraphicVO } from '@/types/graphic'
-import type { MemberVO, SessionDetailVO, SessionJoinVO } from '@/types/session'
+import type {
+  CollaborationConflictType,
+  MemberVO,
+  SessionConflictLogItemVO,
+  SessionDetailVO,
+  SessionJoinVO,
+  SessionOperationItemVO,
+  SessionOperationType,
+  SessionOperationTimelineVO,
+  SessionSnapshotItemVO,
+} from '@/types/session'
 import { storage } from '@/utils/storage'
 import { confirmDanger, feedback } from '@/utils/feedback'
 import WebSocketClient from '@/ws/client'
@@ -24,6 +34,7 @@ import type {
   GraphicUpdatedData,
   MemberJoinedData,
   MemberStatusChangedData,
+  OperationResolvedData,
   OperationVO,
   ReconnectFailedEventData,
   ReconnectingEventData,
@@ -75,6 +86,7 @@ interface OperationHistoryItem {
   userId: number | null
   userLabel: string
   source: OperationHistorySource
+  detail?: string
   timestamp: number
   timeText: string
 }
@@ -122,7 +134,32 @@ const textEditorInputRef = ref<HTMLInputElement | null>(null)
 const textEditingTargetObjectKey = ref<string | null>(null)
 const shortcutDialogVisible = ref(false)
 const operationHistoryVisible = ref(false)
+const conflictHistoryVisible = ref(false)
+const versionHistoryVisible = ref(false)
 const operationHistory = ref<OperationHistoryItem[]>([])
+const operationTimelineLoading = ref(false)
+const operationTimeline = ref<SessionOperationTimelineVO | null>(null)
+const operationTimelineFilterUserId = ref<number | null>(null)
+const operationTimelineFilterOperationType = ref<SessionOperationType | 'all'>('all')
+const operationTimelineFilterConflictType = ref<CollaborationConflictType | 'all'>('all')
+const operationTimelineFilterFromVersion = ref<number | null>(null)
+const operationTimelineFilterToVersion = ref<number | null>(null)
+const operationTimelinePage = ref(1)
+const operationTimelinePageSize = ref(20)
+const conflictLogs = ref<SessionConflictLogItemVO[]>([])
+const snapshots = ref<SessionSnapshotItemVO[]>([])
+const loadingConflictLogs = ref(false)
+const loadingSnapshots = ref(false)
+const replayLoading = ref(false)
+const replayTargetVersion = ref<number | null>(null)
+const conflictSinceId = ref(0)
+const operationMetaByObjectKey = ref<Record<string, { operationId: string; startedAt: number }>>({})
+const collabClientId = ref('')
+const lamportClock = ref(0)
+const serverVersionRef = ref(0)
+const clientVersionRef = ref(0)
+const recentConflictTimestamps = ref<number[]>([])
+const conflictFocusMap = ref<Record<string, { fields: string[]; updatedAt: number }>>({})
 const focusedObjectKey = ref<string | null>(null)
 const textEditorWidth = computed(() => {
   const content = textEditorValue.value || '输入文本，回车确认'
@@ -209,6 +246,40 @@ const canEditFillColor = computed(() => {
 const operationHistoryForDisplay = computed(() => {
   return [...operationHistory.value].sort((a, b) => b.timestamp - a.timestamp)
 })
+const operationTimelineForDisplay = computed(() => operationTimeline.value?.list ?? [])
+const operationTimelineTotal = computed(() => operationTimeline.value?.total ?? 0)
+const operationTimelineUserOptions = computed(() => {
+  const members = sessionDetail.value?.members ?? []
+  return members.map((item) => ({
+    label: item.username,
+    value: item.userId,
+  }))
+})
+const pendingOperationsCount = computed(() => Object.keys(operationMetaByObjectKey.value).length)
+const recentConflictCount = computed(() => {
+  const cutoff = Date.now() - 5 * 60 * 1000
+  return recentConflictTimestamps.value.filter((item) => item >= cutoff).length
+})
+const activeConflictFocusObjectKey = computed(() => {
+  const entries = Object.entries(conflictFocusMap.value)
+  if (entries.length === 0) {
+    return null
+  }
+  const sorted = [...entries].sort((a, b) => (b[1]?.updatedAt ?? 0) - (a[1]?.updatedAt ?? 0))
+  const latest = sorted[0]
+  return latest?.[0] ?? null
+})
+
+watch(
+  () => activeConflictFocusObjectKey.value,
+  (value) => {
+    if (!value) {
+      return
+    }
+    selectedObjectKey.value = value
+    scheduleRender()
+  },
+)
 const showReconnectHint = computed(() => reconnecting.value || reconnectFailed.value)
 const isCreator = computed(() => {
   if (!sessionDetail.value || !currentUserId.value) {
@@ -238,6 +309,44 @@ const getWsUrl = (): string => {
   const baseApi = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000/api/'
   const origin = baseApi.replace(/\/api\/?$/, '')
   return `${origin.replace(/^http/i, 'ws')}/ws`
+}
+
+const loadOrCreateClientId = () => {
+  const cacheKey = 'collab_drawing_client_id'
+  const existing = localStorage.getItem(cacheKey)
+  if (existing && existing.trim().length > 0) {
+    collabClientId.value = existing
+    return
+  }
+  const next = `client_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+  localStorage.setItem(cacheKey, next)
+  collabClientId.value = next
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => {
+  return typeof value === 'object' && value !== null
+}
+
+const parseString = (value: unknown, fallback = ''): string => {
+  return typeof value === 'string' ? value : fallback
+}
+
+const parseNumber = (value: unknown, fallback = 0): number => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+const nextLamportTime = () => {
+  lamportClock.value = Math.max(lamportClock.value + 1, Date.now())
+  return lamportClock.value
+}
+
+const nextOperationId = (operationType: string, objectKey: string, trackByObject = true) => {
+  const opId = `${operationType}_${objectKey}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  if (trackByObject) {
+    operationMetaByObjectKey.value[objectKey] = { operationId: opId, startedAt: Date.now() }
+  }
+  return opId
 }
 
 const ensureCurrentUserId = async (): Promise<number | null> => {
@@ -655,10 +764,12 @@ const drawGrid = (
 const drawSelection = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   const bounds = getGraphicBounds(graphic)
   const isFocused = focusedObjectKey.value === graphic.objectKey
+  const conflictFocus = conflictFocusMap.value[graphic.objectKey]
+  const isConflictFocused = !!conflictFocus
   ctx.save()
-  ctx.strokeStyle = isFocused ? '#f59e0b' : '#1890ff'
-  ctx.lineWidth = isFocused ? 2 : 1
-  ctx.setLineDash(isFocused ? [] : [4, 4])
+  ctx.strokeStyle = isConflictFocused ? '#ef4444' : isFocused ? '#f59e0b' : '#1890ff'
+  ctx.lineWidth = isConflictFocused ? 3 : isFocused ? 2 : 1
+  ctx.setLineDash(isFocused || isConflictFocused ? [] : [4, 4])
   ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height)
   ctx.setLineDash([])
   const handles: Point[] =
@@ -674,10 +785,27 @@ const drawSelection = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
           { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height },
           { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
         ]
-  ctx.fillStyle = isFocused ? '#f59e0b' : '#1890ff'
+  ctx.fillStyle = isConflictFocused ? '#ef4444' : isFocused ? '#f59e0b' : '#1890ff'
   handles.forEach((point) => {
     ctx.fillRect(point.x - 3, point.y - 3, 6, 6)
   })
+
+  if (isConflictFocused && conflictFocus.fields.length > 0) {
+    const text = `冲突字段: ${conflictFocus.fields.join(', ')}`
+    ctx.font = '12px sans-serif'
+    const textWidth = ctx.measureText(text).width
+    const padX = 6
+    const padY = 4
+    const labelX = bounds.x
+    const labelY = bounds.y - 20
+    ctx.fillStyle = '#fee2e2'
+    ctx.strokeStyle = '#ef4444'
+    ctx.lineWidth = 1
+    ctx.fillRect(labelX, labelY, textWidth + padX * 2, 18)
+    ctx.strokeRect(labelX, labelY, textWidth + padX * 2, 18)
+    ctx.fillStyle = '#991b1b'
+    ctx.fillText(text, labelX + padX, labelY + 13)
+  }
   ctx.restore()
 }
 
@@ -797,7 +925,11 @@ const updateSelectedGraphicStyle = (patch: Partial<Pick<GraphicVO, 'strokeColor'
     updatedAt: new Date().toISOString(),
   }
   canvasStore.graphics[index] = nextGraphic
-  sendUpdateGraphic(nextGraphic)
+  sendUpdateGraphicPatch(nextGraphic.objectKey, {
+    ...(typeof patch.strokeColor === 'string' ? { strokeColor: patch.strokeColor } : {}),
+    ...(typeof patch.fillColor === 'string' ? { fillColor: patch.fillColor } : {}),
+    ...(typeof patch.strokeWidth === 'number' ? { strokeWidth: patch.strokeWidth } : {}),
+  })
 }
 
 const getPreviewGraphic = (): GraphicVO | null => {
@@ -1062,7 +1194,58 @@ const mergeGraphicsByObjectKey = (incoming: GraphicVO[]) => {
   canvasStore.graphics = Array.from(map.values())
 }
 
+const toOperationGraphicType = (value: unknown): GraphicVO['objectType'] => {
+  const normalized = parseString(value, 'line')
+  if (normalized === 'line' || normalized === 'rect' || normalized === 'circle' || normalized === 'text' || normalized === 'path') {
+    return normalized
+  }
+  return 'line'
+}
+
+const toOperationPathPoints = (value: unknown): Array<{ x: number; y: number }> | null => {
+  if (!Array.isArray(value)) {
+    return null
+  }
+  const points = value
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .map((item) => ({ x: parseNumber(item.x), y: parseNumber(item.y) }))
+    .filter((item) => Number.isFinite(item.x) && Number.isFinite(item.y))
+  return points.length > 0 ? points : null
+}
+
+const toGraphicFromUnknown = (value: unknown, fallbackObjectKey?: string): GraphicVO | null => {
+  if (!isRecord(value)) {
+    return null
+  }
+  const objectKey = parseString(value.objectKey, fallbackObjectKey ?? '')
+  if (!objectKey) {
+    return null
+  }
+  return {
+    id: parseNumber(value.id),
+    sessionId: parseNumber(value.sessionId, sessionInfo.value?.sessionId ?? 0),
+    objectKey,
+    objectType: toOperationGraphicType(value.objectType),
+    positionX: parseNumber(value.positionX),
+    positionY: parseNumber(value.positionY),
+    width: typeof value.width === 'number' ? value.width : null,
+    height: typeof value.height === 'number' ? value.height : null,
+    strokeColor: parseString(value.strokeColor, '#000000'),
+    fillColor: typeof value.fillColor === 'string' ? value.fillColor : null,
+    strokeWidth: parseNumber(value.strokeWidth, 1),
+    textContent: typeof value.textContent === 'string' ? value.textContent : null,
+    fontSize: typeof value.fontSize === 'number' ? value.fontSize : null,
+    pathPoints: toOperationPathPoints(value.pathPoints),
+    zIndex: parseNumber(value.zIndex),
+    version: parseNumber(value.version),
+    creatorId: parseNumber(value.creatorId),
+    createdAt: parseString(value.createdAt, new Date().toISOString()),
+    updatedAt: parseString(value.updatedAt, new Date().toISOString()),
+  }
+}
+
 const updateSessionVersion = (version: number) => {
+  serverVersionRef.value = version
   if (sessionInfo.value) {
     sessionInfo.value.currentVersion = version
   }
@@ -1084,6 +1267,7 @@ const syncGraphicsFromServer = async (forceFull = false) => {
       mergeGraphicsByObjectKey(result.graphics)
     }
     updateSessionVersion(result.currentVersion)
+    clientVersionRef.value = result.currentVersion
     scheduleRender()
   } catch (error: any) {
     feedback.errorFrom(error, '同步画布失败')
@@ -1149,6 +1333,7 @@ const handleSessionJoined = (payload: SessionJoinedData) => {
     }
   }
   canvasStore.graphics = [...payload.graphics]
+  clientVersionRef.value = payload.currentVersion
   scheduleRender()
 }
 
@@ -1177,6 +1362,7 @@ const handleGraphicCreated = (payload: GraphicCreatedData) => {
     source: payload.userId === currentUserId.value ? 'local' : 'remote',
   })
   updateSessionVersion(payload.currentVersion)
+  clientVersionRef.value = Math.max(clientVersionRef.value, payload.currentVersion)
   lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 }
 
@@ -1192,6 +1378,7 @@ const handleGraphicUpdated = (payload: GraphicUpdatedData) => {
     source: payload.userId === currentUserId.value ? 'local' : 'remote',
   })
   updateSessionVersion(payload.currentVersion)
+  clientVersionRef.value = Math.max(clientVersionRef.value, payload.currentVersion)
   lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 }
 
@@ -1207,6 +1394,7 @@ const handleGraphicDeleted = (payload: GraphicDeletedData) => {
     source: payload.userId === currentUserId.value ? 'local' : 'remote',
   })
   updateSessionVersion(payload.currentVersion)
+  clientVersionRef.value = Math.max(clientVersionRef.value, payload.currentVersion)
   lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 }
 
@@ -1244,8 +1432,12 @@ const handleWsConnected = (payload: ConnectedEventData) => {
   reconnectDelay.value = 0
   if (payload.reconnectAttempt > 0) {
     reconnectTotalCount.value += 1
-    // 重连后必须全量同步，增量合并无法得知离线期间的删除对象。
-    void syncGraphicsFromServer(true)
+    void (async () => {
+      const replayed = await syncOperationsFromServer()
+      if (!replayed) {
+        await syncGraphicsFromServer(true)
+      }
+    })()
   }
   lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 }
@@ -1311,6 +1503,128 @@ const handleWsRedoResult = (data: import('@/ws/types').RedoResultData) => {
   scheduleRender()
 }
 
+const handleWsOperationResolved = (data: OperationResolvedData) => {
+  if (!data.operationId) {
+    return
+  }
+  updateSessionVersion(data.serverVersion)
+  clientVersionRef.value = Math.max(clientVersionRef.value, data.serverVersion)
+  lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+
+  const localOperation = data.objectKey ? operationMetaByObjectKey.value[data.objectKey] : undefined
+  if (data.objectKey && localOperation && localOperation.operationId === data.operationId) {
+    delete operationMetaByObjectKey.value[data.objectKey]
+  }
+
+  if (data.conflictType === 'none' && data.rejectedFields.length === 0) {
+    return
+  }
+
+  recentConflictTimestamps.value = [...recentConflictTimestamps.value, Date.now()].slice(-200)
+  if (data.objectKey) {
+    conflictFocusMap.value[data.objectKey] = {
+      fields: [...data.rejectedFields, ...data.appliedFields].filter((value, index, source) => source.indexOf(value) === index),
+      updatedAt: Date.now(),
+    }
+    selectedObjectKey.value = data.objectKey
+    focusedObjectKey.value = data.objectKey
+    if (focusHighlightTimer !== null) {
+      window.clearTimeout(focusHighlightTimer)
+    }
+    focusHighlightTimer = window.setTimeout(() => {
+      if (data.objectKey) {
+        delete conflictFocusMap.value[data.objectKey]
+      }
+      focusedObjectKey.value = null
+      focusHighlightTimer = null
+      scheduleRender()
+    }, 2800)
+  }
+
+  const rejected = data.rejectedFields.length > 0 ? `，拒绝字段: ${data.rejectedFields.join(', ')}` : ''
+  const applied = data.appliedFields.length > 0 ? `，采用字段: ${data.appliedFields.join(', ')}` : ''
+  const resolveReason = data.resolveReason ? `，策略: ${data.resolveReason}` : ''
+  const detail = `冲突类型: ${data.conflictType}${applied}${rejected}${resolveReason}`
+  pushOperationHistory({
+    operationType: data.operationType,
+    objectKey: data.objectKey,
+    userId: currentUserId.value,
+    source: 'system',
+    detail,
+  })
+  feedback.info(
+    `协同冲突已自动解决：${data.conflictType}${rejected ? `（拒绝: ${data.rejectedFields.join(', ')}）` : ''}`,
+  )
+  scheduleRender()
+}
+
+const applyOperationReplayItem = (operation: SessionOperationItemVO) => {
+  if (operation.operationType === 'delete') {
+    removeGraphic(operation.objectKey)
+    return
+  }
+
+  const resolved = isRecord(operation.resolvedResult) ? operation.resolvedResult : null
+  const resolvedGraphic = toGraphicFromUnknown(resolved?.graphic, operation.objectKey)
+  if (resolvedGraphic) {
+    upsertGraphic(resolvedGraphic)
+    return
+  }
+
+  const patchSource = isRecord(operation.operationData) ? operation.operationData : {}
+  if (operation.operationType === 'create') {
+    const createdGraphic = toGraphicFromUnknown(patchSource, operation.objectKey)
+    if (createdGraphic) {
+      upsertGraphic(createdGraphic)
+    }
+    return
+  }
+
+  patchGraphic({
+    objectKey: operation.objectKey,
+    positionX: typeof patchSource.positionX === 'number' ? patchSource.positionX : undefined,
+    positionY: typeof patchSource.positionY === 'number' ? patchSource.positionY : undefined,
+    width: typeof patchSource.width === 'number' ? patchSource.width : undefined,
+    height: typeof patchSource.height === 'number' ? patchSource.height : undefined,
+    strokeColor: typeof patchSource.strokeColor === 'string' ? patchSource.strokeColor : undefined,
+    fillColor: typeof patchSource.fillColor === 'string' ? patchSource.fillColor : undefined,
+    strokeWidth: typeof patchSource.strokeWidth === 'number' ? patchSource.strokeWidth : undefined,
+    textContent: typeof patchSource.textContent === 'string' ? patchSource.textContent : undefined,
+    fontSize: typeof patchSource.fontSize === 'number' ? patchSource.fontSize : undefined,
+    pathPoints: toOperationPathPoints(patchSource.pathPoints) ?? undefined,
+    zIndex: typeof patchSource.zIndex === 'number' ? patchSource.zIndex : undefined,
+    version: operation.serverVersion,
+  })
+}
+
+const syncOperationsFromServer = async (): Promise<boolean> => {
+  if (!sessionKey.value) {
+    return false
+  }
+  try {
+    const result = await sessionApi.getOperations(sessionKey.value, currentVersion.value)
+    if (result.operations.length > 0) {
+      result.operations.forEach((operation) => {
+        applyOperationReplayItem(operation)
+      })
+      const conflictCount = result.operations.filter((operation) => operation.conflictType !== 'none').length
+      pushOperationHistory({
+        operationType: 'update_graphic',
+        objectKey: '',
+        userId: null,
+        source: 'system',
+        detail: `增量回放 ${result.operations.length} 条操作${conflictCount > 0 ? `，冲突 ${conflictCount} 条` : ''}`,
+      })
+    }
+    updateSessionVersion(result.currentVersion)
+    clientVersionRef.value = result.currentVersion
+    scheduleRender()
+    return true
+  } catch {
+    return false
+  }
+}
+
 const bindWs = (client: WebSocketClient) => {
   client.on('connected', handleWsConnected)
   client.on('disconnected', handleWsDisconnected)
@@ -1325,6 +1639,7 @@ const bindWs = (client: WebSocketClient) => {
   client.on('graphic_created', handleGraphicCreated)
   client.on('graphic_updated', handleGraphicUpdated)
   client.on('graphic_deleted', handleGraphicDeleted)
+  client.on('operation_resolved', handleWsOperationResolved)
   client.on('undo_result', handleWsUndoResult)
   client.on('redo_result', handleWsRedoResult)
 }
@@ -1343,6 +1658,7 @@ const unbindWs = (client: WebSocketClient) => {
   client.off('graphic_created', handleGraphicCreated)
   client.off('graphic_updated', handleGraphicUpdated)
   client.off('graphic_deleted', handleGraphicDeleted)
+  client.off('operation_resolved', handleWsOperationResolved)
   client.off('undo_result', handleWsUndoResult)
   client.off('redo_result', handleWsRedoResult)
 }
@@ -1574,7 +1890,73 @@ const handleShowShortcuts = () => {
 }
 
 const handleShowOperationHistory = () => {
+  void handleOpenOperationTimeline()
+}
+
+const loadOperationTimeline = async () => {
+  if (!sessionKey.value || operationTimelineLoading.value) {
+    return
+  }
+  operationTimelineLoading.value = true
+  try {
+    operationTimeline.value = await sessionApi.getOperationTimeline(sessionKey.value, {
+      ...(typeof operationTimelineFilterFromVersion.value === 'number'
+        ? { fromVersion: operationTimelineFilterFromVersion.value }
+        : {}),
+      ...(typeof operationTimelineFilterToVersion.value === 'number'
+        ? { toVersion: operationTimelineFilterToVersion.value }
+        : {}),
+      ...(typeof operationTimelineFilterUserId.value === 'number' ? { userId: operationTimelineFilterUserId.value } : {}),
+      ...(operationTimelineFilterOperationType.value !== 'all'
+        ? { operationType: operationTimelineFilterOperationType.value }
+        : {}),
+      ...(operationTimelineFilterConflictType.value !== 'all'
+        ? { conflictType: operationTimelineFilterConflictType.value }
+        : {}),
+      page: operationTimelinePage.value,
+      pageSize: operationTimelinePageSize.value,
+    })
+  } catch (error) {
+    feedback.errorFrom(error, '加载操作时间线失败')
+  } finally {
+    operationTimelineLoading.value = false
+  }
+}
+
+const handleOpenOperationTimeline = async () => {
   operationHistoryVisible.value = true
+  operationTimelinePage.value = 1
+  await loadOperationTimeline()
+}
+
+const handleResetOperationTimelineFilters = async () => {
+  operationTimelineFilterUserId.value = null
+  operationTimelineFilterOperationType.value = 'all'
+  operationTimelineFilterConflictType.value = 'all'
+  operationTimelineFilterFromVersion.value = null
+  operationTimelineFilterToVersion.value = null
+  operationTimelinePage.value = 1
+  await loadOperationTimeline()
+}
+
+const handleOperationTimelineSearch = async () => {
+  operationTimelinePage.value = 1
+  await loadOperationTimeline()
+}
+
+const handleOperationTimelinePageChange = async (page: number) => {
+  operationTimelinePage.value = page
+  await loadOperationTimeline()
+}
+
+const handleShowConflictHistory = async () => {
+  conflictHistoryVisible.value = true
+  await refreshConflictLogs(true)
+}
+
+const handleShowVersionHistory = async () => {
+  versionHistoryVisible.value = true
+  await refreshSnapshots()
 }
 
 const handleBackToList = async () => {
@@ -1708,6 +2090,7 @@ const pushOperationHistory = (payload: {
   objectKey: string
   userId: number | null
   source: OperationHistorySource
+  detail?: string
 }) => {
   const now = Date.now()
   const userName = findMemberNameByUserId(payload.userId)
@@ -1720,10 +2103,230 @@ const pushOperationHistory = (payload: {
     userId: payload.userId,
     userLabel,
     source: payload.source,
+    ...(payload.detail ? { detail: payload.detail } : {}),
     timestamp: now,
     timeText: new Date(now).toLocaleTimeString('zh-CN', { hour12: false }),
   }
   operationHistory.value = [item, ...operationHistory.value].slice(0, 20)
+}
+
+const formatSessionOperationTypeLabel = (operationType: SessionOperationType) => {
+  if (operationType === 'create') {
+    return '创建图元'
+  }
+  if (operationType === 'update') {
+    return '更新图元'
+  }
+  return '删除图元'
+}
+
+const formatConflictTypeLabel = (conflictType: CollaborationConflictType) => {
+  if (conflictType === 'none') {
+    return '无冲突'
+  }
+  if (conflictType === 'field_merge') {
+    return '字段合并'
+  }
+  if (conflictType === 'field_conflict') {
+    return '字段冲突'
+  }
+  if (conflictType === 'delete_wins') {
+    return '删除优先'
+  }
+  return '重复操作'
+}
+
+const formatConflictValue = (value: unknown): string => {
+  if (value === null || typeof value === 'undefined') {
+    return '-'
+  }
+  if (typeof value === 'string') {
+    return value
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return '[复杂对象]'
+  }
+}
+
+const refreshConflictLogs = async (forceFromStart = false) => {
+  if (!sessionKey.value) {
+    return
+  }
+  if (loadingConflictLogs.value) {
+    return
+  }
+  loadingConflictLogs.value = true
+  try {
+    const sinceId = forceFromStart ? 0 : conflictSinceId.value
+    const result = await sessionApi.getConflictLogs(sessionKey.value, sinceId, 100)
+    if (forceFromStart) {
+      conflictLogs.value = result.conflicts
+    } else {
+      conflictLogs.value = [...conflictLogs.value, ...result.conflicts]
+    }
+    const maxId = result.conflicts.reduce((max, item) => Math.max(max, item.id), forceFromStart ? 0 : conflictSinceId.value)
+    conflictSinceId.value = maxId
+  } catch (error) {
+    feedback.errorFrom(error, '加载冲突日志失败')
+  } finally {
+    loadingConflictLogs.value = false
+  }
+}
+
+const refreshSnapshots = async () => {
+  if (!sessionKey.value || loadingSnapshots.value) {
+    return
+  }
+  loadingSnapshots.value = true
+  try {
+    const result = await sessionApi.getSnapshots(sessionKey.value, 20)
+    snapshots.value = result.snapshots
+  } catch (error) {
+    feedback.errorFrom(error, '加载版本快照失败')
+  } finally {
+    loadingSnapshots.value = false
+  }
+}
+
+const createSnapshotNow = async () => {
+  if (!sessionKey.value || loadingSnapshots.value) {
+    return
+  }
+  loadingSnapshots.value = true
+  try {
+    await sessionApi.createSnapshot(sessionKey.value)
+    feedback.success('已创建版本快照')
+    await refreshSnapshots()
+  } catch (error) {
+    feedback.errorFrom(error, '创建快照失败')
+  } finally {
+    loadingSnapshots.value = false
+  }
+}
+
+const restoreToVersion = async (targetVersion: number) => {
+  if (!sessionKey.value || replayLoading.value) {
+    return
+  }
+  replayLoading.value = true
+  replayTargetVersion.value = targetVersion
+  try {
+    const result = await sessionApi.restoreVersion(sessionKey.value, targetVersion)
+    await syncGraphicsFromServer(true)
+    await refreshSnapshots()
+    updateSessionVersion(result.restoredVersion)
+    feedback.success(
+      `已恢复到版本 ${targetVersion}，当前版本 ${result.restoredVersion}（创建 ${result.createdCount}，更新 ${result.updatedCount}，删除 ${result.deletedCount}）`,
+    )
+  } catch (error) {
+    feedback.errorFrom(error, '版本恢复失败')
+  } finally {
+    replayLoading.value = false
+    replayTargetVersion.value = null
+  }
+}
+
+const convertUnknownGraphicToGraphicVO = (source: Record<string, unknown>): GraphicVO | null => {
+  const objectKey = parseString(source.objectKey)
+  if (!objectKey) {
+    return null
+  }
+  const objectTypeRaw = parseString(source.objectType, 'line')
+  const objectType =
+    objectTypeRaw === 'line' || objectTypeRaw === 'rect' || objectTypeRaw === 'circle' || objectTypeRaw === 'text' || objectTypeRaw === 'path'
+      ? objectTypeRaw
+      : 'line'
+  const pathPoints = toOperationPathPoints(source.pathPoints)
+  return {
+    id: parseNumber(source.id),
+    sessionId: parseNumber(source.sessionId, sessionInfo.value?.sessionId ?? 0),
+    objectKey,
+    objectType,
+    positionX: parseNumber(source.positionX),
+    positionY: parseNumber(source.positionY),
+    width: typeof source.width === 'number' ? source.width : null,
+    height: typeof source.height === 'number' ? source.height : null,
+    strokeColor: parseString(source.strokeColor, '#000000'),
+    fillColor: typeof source.fillColor === 'string' ? source.fillColor : null,
+    strokeWidth: parseNumber(source.strokeWidth, 1),
+    textContent: typeof source.textContent === 'string' ? source.textContent : null,
+    fontSize: typeof source.fontSize === 'number' ? source.fontSize : null,
+    pathPoints,
+    zIndex: parseNumber(source.zIndex),
+    version: parseNumber(source.version),
+    creatorId: parseNumber(source.creatorId),
+    createdAt: parseString(source.createdAt, new Date().toISOString()),
+    updatedAt: parseString(source.updatedAt, new Date().toISOString()),
+  }
+}
+
+const applyReplayToCanvas = async (targetVersion: number) => {
+  if (!sessionKey.value || replayLoading.value) {
+    return
+  }
+  replayLoading.value = true
+  replayTargetVersion.value = targetVersion
+  try {
+    const replay = await sessionApi.getReplay(sessionKey.value, targetVersion)
+    const replayMap = new Map<string, GraphicVO>()
+    const baseGraphics = replay.baseSnapshotData?.graphics ?? []
+    baseGraphics.forEach((item) => {
+      if (isRecord(item)) {
+        const next = convertUnknownGraphicToGraphicVO(item)
+        if (next) {
+          replayMap.set(next.objectKey, next)
+        }
+      }
+    })
+
+    replay.operations.forEach((op) => {
+      if (op.operationType === 'delete') {
+        replayMap.delete(op.objectKey)
+        return
+      }
+      const resolvedGraphic = isRecord(op.resolvedResult?.graphic) ? convertUnknownGraphicToGraphicVO(op.resolvedResult.graphic) : null
+      if (resolvedGraphic) {
+        replayMap.set(resolvedGraphic.objectKey, resolvedGraphic)
+        return
+      }
+      const current = replayMap.get(op.objectKey)
+      if (!current) {
+        return
+      }
+      const patch = isRecord(op.operationData) ? op.operationData : {}
+      const updated: GraphicVO = {
+        ...current,
+        positionX: typeof patch.positionX === 'number' ? patch.positionX : current.positionX,
+        positionY: typeof patch.positionY === 'number' ? patch.positionY : current.positionY,
+        width: typeof patch.width === 'number' ? patch.width : current.width,
+        height: typeof patch.height === 'number' ? patch.height : current.height,
+        strokeColor: typeof patch.strokeColor === 'string' ? patch.strokeColor : current.strokeColor,
+        fillColor: typeof patch.fillColor === 'string' ? patch.fillColor : current.fillColor,
+        strokeWidth: typeof patch.strokeWidth === 'number' ? patch.strokeWidth : current.strokeWidth,
+        textContent: typeof patch.textContent === 'string' ? patch.textContent : current.textContent,
+        fontSize: typeof patch.fontSize === 'number' ? patch.fontSize : current.fontSize,
+        pathPoints: toOperationPathPoints(patch.pathPoints) ?? current.pathPoints,
+        zIndex: typeof patch.zIndex === 'number' ? patch.zIndex : current.zIndex,
+        version: op.serverVersion,
+      }
+      replayMap.set(op.objectKey, updated)
+    })
+
+    canvasStore.graphics = Array.from(replayMap.values()).sort((a, b) => a.zIndex - b.zIndex)
+    updateSessionVersion(targetVersion)
+    scheduleRender()
+    feedback.success(`已回放到版本 ${targetVersion}`)
+  } catch (error) {
+    feedback.errorFrom(error, '版本回放失败')
+  } finally {
+    replayLoading.value = false
+    replayTargetVersion.value = null
+  }
 }
 
 const buildLocalOperation = (
@@ -1747,8 +2350,14 @@ const sendCreateGraphic = (graphic: GraphicVO) => {
   if (!wsClient || !canvasStore.currentSession) {
     return
   }
+  const operationId = nextOperationId('create_graphic', graphic.objectKey)
+  const lamportTime = nextLamportTime()
   wsClient.sendCreateGraphic({
     sessionKey: canvasStore.currentSession.sessionKey,
+    operationId,
+    clientId: collabClientId.value,
+    baseVersion: currentVersion.value,
+    lamportTime,
     objectKey: graphic.objectKey,
     objectType: graphic.objectType,
     positionX: graphic.positionX,
@@ -1781,8 +2390,14 @@ const sendUpdateGraphic = (graphic: GraphicVO) => {
   if (!wsClient || !canvasStore.currentSession) {
     return
   }
+  const operationId = nextOperationId('update_graphic', graphic.objectKey)
+  const lamportTime = nextLamportTime()
   wsClient.sendUpdateGraphic({
     sessionKey: canvasStore.currentSession.sessionKey,
+    operationId,
+    clientId: collabClientId.value,
+    baseVersion: currentVersion.value,
+    lamportTime,
     objectKey: graphic.objectKey,
     positionX: graphic.positionX,
     positionY: graphic.positionY,
@@ -1810,6 +2425,42 @@ const sendUpdateGraphic = (graphic: GraphicVO) => {
   })
 }
 
+const sendUpdateGraphicPatch = (objectKey: string, patch: NonNullable<import('@/ws/types').UpdateGraphicData['patch']>) => {
+  if (!wsClient || !canvasStore.currentSession) {
+    return
+  }
+  const patchKeys = Object.keys(patch).filter((item) => typeof (patch as Record<string, unknown>)[item] !== 'undefined')
+  if (patchKeys.length === 0) {
+    return
+  }
+  const operationId = nextOperationId('update_graphic', objectKey)
+  const lamportTime = nextLamportTime()
+  wsClient.sendUpdateGraphic({
+    sessionKey: canvasStore.currentSession.sessionKey,
+    operationId,
+    clientId: collabClientId.value,
+    baseVersion: currentVersion.value,
+    lamportTime,
+    objectKey,
+    patch: {
+      ...patch,
+    },
+  })
+
+  canvasStore.pushLocalOperation(
+    buildLocalOperation('update_graphic', objectKey, {
+      objectKey,
+      ...patch,
+    }),
+  )
+  pushOperationHistory({
+    operationType: 'update_graphic',
+    objectKey,
+    userId: currentUserId.value,
+    source: 'local',
+  })
+}
+
 const deleteSelectedGraphic = () => {
   const selected = selectedGraphic.value
   const session = canvasStore.currentSession
@@ -1817,7 +2468,16 @@ const deleteSelectedGraphic = () => {
   if (!selected || !client || !session) {
     return
   }
-  client.sendDeleteGraphic(session.sessionKey, selected.objectKey)
+  const operationId = nextOperationId('delete_graphic', selected.objectKey)
+  const lamportTime = nextLamportTime()
+  client.sendDeleteGraphicWithMeta({
+    sessionKey: session.sessionKey,
+    operationId,
+    clientId: collabClientId.value,
+    baseVersion: currentVersion.value,
+    lamportTime,
+    objectKey: selected.objectKey,
+  })
   removeGraphic(selected.objectKey)
   canvasStore.pushLocalOperation(
     buildLocalOperation('delete_graphic', selected.objectKey, {
@@ -1894,8 +2554,8 @@ const swapGraphicZIndex = (first: GraphicVO, second: GraphicVO) => {
   canvasStore.graphics[firstIndex] = firstNext
   canvasStore.graphics[secondIndex] = secondNext
 
-  sendUpdateGraphic(firstNext)
-  sendUpdateGraphic(secondNext)
+  sendUpdateGraphicPatch(firstNext.objectKey, { zIndex: firstNext.zIndex })
+  sendUpdateGraphicPatch(secondNext.objectKey, { zIndex: secondNext.zIndex })
   scheduleRender()
 }
 
@@ -2002,7 +2662,7 @@ const commitTextEditing = () => {
           }
           canvasStore.graphics[index] = nextGraphic
           selectedObjectKey.value = nextGraphic.objectKey
-          sendUpdateGraphic(nextGraphic)
+          sendUpdateGraphicPatch(nextGraphic.objectKey, { textContent: content })
         }
         cancelTextEditing()
         return
@@ -2251,7 +2911,13 @@ const handleMouseUp = () => {
         resized.width !== original.width ||
         resized.height !== original.height)
     ) {
-      sendUpdateGraphic(resized)
+      sendUpdateGraphicPatch(resized.objectKey, {
+        positionX: resized.positionX,
+        positionY: resized.positionY,
+        ...(typeof resized.width === 'number' ? { width: resized.width } : {}),
+        ...(typeof resized.height === 'number' ? { height: resized.height } : {}),
+        ...(typeof resized.fontSize === 'number' ? { fontSize: resized.fontSize } : {}),
+      })
     }
     resizeState.value.originalGraphic = null
     return
@@ -2276,7 +2942,11 @@ const handleMouseUp = () => {
         moved.textContent !== original.textContent ||
         moved.fontSize !== original.fontSize)
     ) {
-      sendUpdateGraphic(moved)
+      sendUpdateGraphicPatch(moved.objectKey, {
+        positionX: moved.positionX,
+        positionY: moved.positionY,
+        ...(Array.isArray(moved.pathPoints) ? { pathPoints: moved.pathPoints } : {}),
+      })
     }
     dragMove.value.basePathPoints = null
     dragMove.value.originalGraphic = null
@@ -2334,11 +3004,25 @@ const handleMouseLeave = () => {
 
 
 const handleUndo = async () => {
-  await canvasStore.undo()
+  const operationId = nextOperationId('undo', 'global', false)
+  const lamportTime = nextLamportTime()
+  await canvasStore.undo({
+    operationId,
+    clientId: collabClientId.value,
+    baseVersion: currentVersion.value,
+    lamportTime,
+  })
 }
 
 const handleRedo = async () => {
-  await canvasStore.redo()
+  const operationId = nextOperationId('redo', 'global', false)
+  const lamportTime = nextLamportTime()
+  await canvasStore.redo({
+    operationId,
+    clientId: collabClientId.value,
+    baseVersion: currentVersion.value,
+    lamportTime,
+  })
 }
 
 const clampZoomPercent = (value: number) => {
@@ -2505,6 +3189,7 @@ watch(
 )
 
 onMounted(async () => {
+  loadOrCreateClientId()
   window.addEventListener('keydown', handleKeydown)
   document.addEventListener('visibilitychange', onVisibilityChange)
 
@@ -2513,6 +3198,8 @@ onMounted(async () => {
   resizeCanvas()
   setupResizeObserver()
   await syncGraphicsFromServer(true)
+  clientVersionRef.value = currentVersion.value
+  serverVersionRef.value = currentVersion.value
   lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   scheduleRender()
 })
@@ -2554,6 +3241,8 @@ onBeforeUnmount(() => {
       @share="handleShare"
       @export-image="handleExportImage"
       @show-history="handleShowOperationHistory"
+      @show-conflicts="handleShowConflictHistory"
+      @show-versions="handleShowVersionHistory"
       @show-shortcuts="handleShowShortcuts"
       @leave="handleLeaveSession"
       @delete-session="handleDeleteSession"
@@ -2642,6 +3331,10 @@ onBeforeUnmount(() => {
       :zoom-options="zoomOptions"
       :graphic-count="canvasStore.graphics.length"
       :current-version="currentVersion"
+      :server-version="serverVersionRef"
+      :client-version="clientVersionRef"
+      :pending-operations="pendingOperationsCount"
+      :recent-conflicts="recentConflictCount"
       :connected="wsConnected"
       :last-sync-at="lastSyncText"
       :reconnect-count="reconnectTotalCount"
@@ -2676,32 +3369,174 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="operationHistoryVisible" title="操作历史（最近 20 条）" width="560px">
-      <div v-if="operationHistoryForDisplay.length === 0" class="history-empty">暂无操作记录</div>
+    <el-dialog v-model="operationHistoryVisible" title="协同操作时间线" width="860px">
+      <div class="timeline-filter">
+        <el-select v-model="operationTimelineFilterUserId" clearable placeholder="操作者" size="small" style="width: 140px">
+          <el-option v-for="item in operationTimelineUserOptions" :key="item.value" :label="item.label" :value="item.value" />
+        </el-select>
+        <el-select
+          v-model="operationTimelineFilterOperationType"
+          placeholder="操作类型"
+          size="small"
+          style="width: 130px"
+        >
+          <el-option label="全部操作" value="all" />
+          <el-option label="创建图元" value="create" />
+          <el-option label="更新图元" value="update" />
+          <el-option label="删除图元" value="delete" />
+        </el-select>
+        <el-select
+          v-model="operationTimelineFilterConflictType"
+          placeholder="冲突类型"
+          size="small"
+          style="width: 130px"
+        >
+          <el-option label="全部冲突" value="all" />
+          <el-option label="无冲突" value="none" />
+          <el-option label="字段合并" value="field_merge" />
+          <el-option label="字段冲突" value="field_conflict" />
+          <el-option label="删除优先" value="delete_wins" />
+          <el-option label="重复操作" value="duplicate_operation" />
+        </el-select>
+        <el-input-number v-model="operationTimelineFilterFromVersion" :min="0" size="small" placeholder="起始版本" />
+        <el-input-number v-model="operationTimelineFilterToVersion" :min="0" size="small" placeholder="结束版本" />
+        <el-button size="small" type="primary" :loading="operationTimelineLoading" @click="handleOperationTimelineSearch">
+          查询
+        </el-button>
+        <el-button size="small" @click="handleResetOperationTimelineFilters">重置</el-button>
+      </div>
+
+      <div v-if="operationTimelineLoading" class="history-empty">加载中...</div>
+      <div v-else-if="operationTimelineForDisplay.length === 0" class="history-empty">暂无操作记录</div>
       <div v-else class="history-list">
-        <div v-for="item in operationHistoryForDisplay" :key="item.id" class="history-row">
+        <div v-for="item in operationTimelineForDisplay" :key="item.id" class="history-row">
           <div class="history-main">
-            <span class="history-type">{{ formatOperationTypeLabel(item.operationType) }}</span>
-            <span class="history-user">{{ item.userLabel }}</span>
+            <span class="history-type">{{ formatSessionOperationTypeLabel(item.operationType) }}</span>
+            <span class="history-user">{{ findMemberNameByUserId(item.userId) || `用户 ${item.userId}` }}</span>
+            <span class="history-conflict">{{ formatConflictTypeLabel(item.conflictType) }}</span>
             <el-button
               link
               type="primary"
               size="small"
               :disabled="!canLocateHistoryObject(item.objectKey)"
-              @click="locateHistoryObject(item)"
+              @click="
+                locateHistoryObject({
+                  id: String(item.id),
+                  operationType: item.operationType === 'create' ? 'create_graphic' : item.operationType === 'update' ? 'update_graphic' : 'delete_graphic',
+                  objectKey: item.objectKey,
+                  userId: item.userId,
+                  userLabel: '',
+                  source: 'system',
+                  timestamp: item.timestamp,
+                  timeText: new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour12: false }),
+                })
+              "
             >
               定位到对象
             </el-button>
           </div>
+          <div v-if="item.resolvedResult?.appliedFields || item.resolvedResult?.rejectedFields" class="history-detail">
+            <span v-if="Array.isArray(item.resolvedResult?.appliedFields) && item.resolvedResult?.appliedFields.length > 0">
+              采用字段: {{ item.resolvedResult?.appliedFields.join(', ') }}
+            </span>
+            <span
+              v-if="
+                Array.isArray(item.resolvedResult?.rejectedFields) && item.resolvedResult?.rejectedFields.length > 0
+              "
+            >
+              ，拒绝字段: {{ item.resolvedResult?.rejectedFields.join(', ') }}
+            </span>
+          </div>
           <div class="history-meta">
             <span class="history-object">对象: {{ item.objectKey || '-' }}</span>
-            <span class="history-source">{{ formatOperationSourceLabel(item.source) }}</span>
-            <span class="history-time">{{ item.timeText }}</span>
+            <span>版本: {{ item.serverVersion }}</span>
+            <span>基线版本: {{ item.baseVersion }}</span>
+            <span>操作ID: {{ item.operationId || '-' }}</span>
+            <span class="history-time">{{ new Date(item.timestamp).toLocaleString('zh-CN', { hour12: false }) }}</span>
+          </div>
+        </div>
+      </div>
+      <div class="timeline-pagination">
+        <el-pagination
+          background
+          layout="prev, pager, next, total"
+          :current-page="operationTimelinePage"
+          :page-size="operationTimelinePageSize"
+          :total="operationTimelineTotal"
+          @current-change="handleOperationTimelinePageChange"
+        />
+      </div>
+      <template #footer>
+        <el-button @click="operationHistoryVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="conflictHistoryVisible" title="冲突日志（CRDT）" width="760px">
+      <div class="conflict-toolbar">
+        <el-button size="small" :loading="loadingConflictLogs" @click="refreshConflictLogs(true)">刷新</el-button>
+      </div>
+      <div v-if="conflictLogs.length === 0" class="history-empty">暂无冲突记录</div>
+      <div v-else class="conflict-list">
+        <div v-for="item in conflictLogs" :key="item.id" class="conflict-row">
+          <div class="conflict-head">
+            <span class="conflict-type">{{ item.conflictType }}</span>
+            <span class="conflict-field">{{ item.fieldName || '-' }}</span>
+            <span class="conflict-time">{{ new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
+          </div>
+          <div class="conflict-meta">
+            <span>对象: {{ item.objectKey }}</span>
+            <span>策略: {{ item.resolveStrategy }}</span>
+            <span>操作ID: {{ item.operationId || '-' }}</span>
+          </div>
+          <div class="conflict-values">
+            <div>当前值: {{ formatConflictValue(item.currentValue) }}</div>
+            <div>传入值: {{ formatConflictValue(item.incomingValue) }}</div>
+            <div>采用值: {{ formatConflictValue(item.resolvedValue) }}</div>
           </div>
         </div>
       </div>
       <template #footer>
-        <el-button @click="operationHistoryVisible = false">关闭</el-button>
+        <el-button @click="conflictHistoryVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="versionHistoryVisible" title="版本快照与回放" width="760px">
+      <div class="version-toolbar">
+        <el-button size="small" :loading="loadingSnapshots" @click="refreshSnapshots">刷新</el-button>
+        <el-button size="small" type="primary" :loading="loadingSnapshots" @click="createSnapshotNow">创建快照</el-button>
+      </div>
+      <div v-if="snapshots.length === 0" class="history-empty">暂无版本快照</div>
+      <div v-else class="version-list">
+        <div v-for="item in snapshots" :key="item.id" class="version-row">
+          <div class="version-head">
+            <span class="version-tag">版本 {{ item.version }}</span>
+            <span class="version-time">{{ new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
+          </div>
+          <div class="version-meta">
+            <span>图元数量: {{ item.graphicCount }}</span>
+            <span>快照ID: {{ item.id }}</span>
+          </div>
+          <div class="version-actions">
+            <el-button
+              size="small"
+              :loading="replayLoading && replayTargetVersion === item.version"
+              @click="applyReplayToCanvas(item.version)"
+            >
+              回放到此版本
+            </el-button>
+            <el-button
+              size="small"
+              type="warning"
+              :loading="replayLoading && replayTargetVersion === item.version"
+              @click="restoreToVersion(item.version)"
+            >
+              恢复到此版本
+            </el-button>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="versionHistoryVisible = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
@@ -2709,29 +3544,31 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .draw-page {
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
-  grid-template-rows: 56px 1fr 32px;
-  background: #f3f5f9;
+  grid-template-rows: 52px 1fr 30px;
+  background: var(--cd-bg-page);
+  overflow: hidden;
 }
 
 .draw-main {
   min-height: 0;
   display: grid;
-  grid-template-columns: 136px minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 .canvas-area {
   min-width: 0;
-  padding: 8px;
+  min-height: 0;
+  padding: 10px;
 }
 
 .canvas-container {
   width: 100%;
   height: 100%;
-  min-height: calc(100vh - 56px - 32px - 16px);
-  border: 1px solid #dbe2ea;
-  border-radius: 12px;
+  border: 1px solid var(--cd-border);
+  border-radius: var(--cd-radius-md);
   background: #ffffff;
   overflow: hidden;
   position: relative;
@@ -2766,18 +3603,20 @@ onBeforeUnmount(() => {
 
 .reconnect-bar {
   position: fixed;
-  top: 66px;
+  top: 60px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 20;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 8px 14px;
   border: 1px solid #fcd34d;
-  border-radius: 8px;
+  border-radius: var(--cd-radius-sm);
   background: #fef3c7;
   color: #92400e;
+  font-size: 13px;
+  box-shadow: var(--cd-shadow-md);
 }
 
 .reconnect-bar.failed {
@@ -2822,6 +3661,14 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.timeline-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
 .history-row {
   border: 1px solid #e5e7eb;
   border-radius: 8px;
@@ -2836,6 +3683,12 @@ onBeforeUnmount(() => {
   margin-bottom: 4px;
 }
 
+.history-detail {
+  color: #1f2937;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
 .history-type {
   color: #111827;
   font-weight: 600;
@@ -2844,6 +3697,11 @@ onBeforeUnmount(() => {
 
 .history-user {
   color: #374151;
+  font-size: 12px;
+}
+
+.history-conflict {
+  color: #6b7280;
   font-size: 12px;
 }
 
@@ -2856,9 +3714,131 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
+.timeline-pagination {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.conflict-toolbar {
+  margin-bottom: 8px;
+}
+
+.conflict-list {
+  max-height: 440px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.conflict-row {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fafafa;
+}
+
+.conflict-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.conflict-type {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.conflict-field {
+  color: #1f2937;
+  font-size: 12px;
+}
+
+.conflict-time {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.conflict-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #6b7280;
+  font-size: 12px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.conflict-values {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: #1f2937;
+  font-size: 12px;
+}
+
+.version-toolbar {
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.version-list {
+  max-height: 440px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.version-row {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fafafa;
+}
+
+.version-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.version-tag {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.version-time {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.version-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #6b7280;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.version-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 @media (max-width: 1024px) {
   .draw-main {
-    grid-template-columns: 136px minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr);
   }
 }
 </style>

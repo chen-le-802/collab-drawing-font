@@ -87,30 +87,32 @@ const handleCommand = async (command: string) => {
 <style scoped>
 .app-header {
   height: 64px;
-  padding: 0 24px;
+  padding: 0 28px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #ffffff;
-  border-bottom: 1px solid #ebeef5;
+  background: var(--cd-bg-card);
+  box-shadow: var(--cd-shadow-sm);
+  position: relative;
+  z-index: 10;
 }
 
 .logo {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   cursor: pointer;
   user-select: none;
 }
 
 .logo-mark {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #2d72ff;
+  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
   color: #ffffff;
   font-size: 12px;
   font-weight: 700;
@@ -118,9 +120,9 @@ const handleCommand = async (command: string) => {
 }
 
 .logo-text {
-  color: #1f2d3d;
+  color: var(--cd-text-primary);
   font-size: 16px;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .nav-menu {
@@ -128,22 +130,42 @@ const handleCommand = async (command: string) => {
   margin-left: 40px;
   border-bottom: 0;
   min-width: 220px;
+  --el-menu-border-color: transparent;
+}
+
+:deep(.el-menu--horizontal > .el-menu-item) {
+  border-bottom: none;
+  border-radius: var(--cd-radius-sm);
+  margin: 0 4px;
+  transition: background var(--cd-transition), color var(--cd-transition);
+}
+
+:deep(.el-menu--horizontal > .el-menu-item:hover) {
+  background: var(--cd-primary-light);
 }
 
 :deep(.el-menu--horizontal > .el-menu-item.is-active) {
-  color: #2d72ff;
-  border-bottom-color: #2d72ff;
+  color: var(--cd-primary);
+  background: var(--cd-primary-light);
+  border-bottom-color: transparent;
 }
 
 .user-trigger {
   display: flex;
   align-items: center;
   cursor: pointer;
+  padding: 3px;
+  border-radius: 50%;
+  transition: box-shadow var(--cd-transition);
+}
+
+.user-trigger:hover {
+  box-shadow: 0 0 0 3px var(--cd-primary-light);
 }
 
 .user-avatar {
-  background: #dfe9ff;
-  color: #2d72ff;
+  background: var(--cd-primary-light);
+  color: var(--cd-primary);
   font-weight: 700;
 }
 </style>

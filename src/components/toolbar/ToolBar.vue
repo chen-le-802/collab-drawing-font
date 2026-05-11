@@ -49,39 +49,41 @@ const setTool = (tool: CanvasTool) => {
 <template>
   <aside class="toolbar-wrap">
     <div class="tools">
-      <button class="tool-btn" :class="{ active: activeTool === 'select' }" @click="setTool('select')" title="选择">
+      <button class="tool-btn" :class="{ active: activeTool === 'select' }" @click="setTool('select')" title="选择 (V)">
         <el-icon><Pointer /></el-icon>
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'line' }" @click="setTool('line')" title="直线">
+      <button class="tool-btn" :class="{ active: panMode }" @click="$emit('update:panMode', !panMode)" title="平移 (H)">
+        &#9995;
+      </button>
+      <button class="tool-btn" :class="{ active: activeTool === 'line' }" @click="setTool('line')" title="直线 (L)">
         <el-icon><Minus /></el-icon>
       </button>
       <button class="tool-btn" :class="{ active: activeTool === 'arrow' }" @click="setTool('arrow')" title="箭头">
-        →
+        &#10132;
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'rect' }" @click="setTool('rect')" title="矩形">
+      <button class="tool-btn" :class="{ active: activeTool === 'rect' }" @click="setTool('rect')" title="矩形 (R)">
         <el-icon><SemiSelect /></el-icon>
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'circle' }" @click="setTool('circle')" title="圆形">
-        <el-icon><RefreshLeft /></el-icon>
+      <button class="tool-btn" :class="{ active: activeTool === 'circle' }" @click="setTool('circle')" title="圆形 (O)">
+        &#9711;
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'text' }" @click="setTool('text')" title="文本">
+      <button class="tool-btn" :class="{ active: activeTool === 'text' }" @click="setTool('text')" title="文本 (T)">
         <el-icon><EditPen /></el-icon>
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'brush' }" @click="setTool('brush')" title="画笔">
-        B
-      </button>
-      <button class="tool-btn danger" :disabled="!canDelete" @click="$emit('delete')" title="删除图形">
-        <el-icon><Delete /></el-icon>
+      <button class="tool-btn" :class="{ active: activeTool === 'brush' }" @click="setTool('brush')" title="画笔 (B)">
+        &#9998;
       </button>
     </div>
 
+    <div class="separator"></div>
+
     <div class="section">
-      <div class="title">边框颜色</div>
+      <div class="section-label">描边</div>
       <ColorPicker :model-value="strokeColor" @update:model-value="$emit('update:strokeColor', $event)" />
     </div>
 
     <div class="section">
-      <div class="title">填充颜色</div>
+      <div class="section-label">填充</div>
       <ColorPicker
         :model-value="fillColor"
         :allow-transparent="true"
@@ -90,88 +92,110 @@ const setTool = (tool: CanvasTool) => {
     </div>
 
     <div class="section">
-      <div class="title">线宽</div>
-      <div class="width-list">
+      <div class="section-label">线宽</div>
+      <div class="width-row">
         <button
           v-for="item in strokeWidths"
           :key="item"
-          class="width-btn"
+          class="width-chip"
           :class="{ active: strokeWidth === item }"
           @click="$emit('update:strokeWidth', item)"
         >
-          {{ item }}px
+          {{ item }}
         </button>
       </div>
     </div>
 
-    <div class="section">
-      <div class="title">层级</div>
-      <div class="assist">
-        <button class="assist-btn" :disabled="!canBringForward" @click="$emit('bringForward')" title="上移一层">
-          <el-icon><Top /></el-icon>
-        </button>
-        <button class="assist-btn" :disabled="!canSendBackward" @click="$emit('sendBackward')" title="下移一层">
-          <el-icon><Bottom /></el-icon>
-        </button>
-      </div>
+    <div class="separator"></div>
+
+    <div class="action-row">
+      <button class="action-btn" :disabled="!canUndo" @click="$emit('undo')" title="撤销">
+        <el-icon><RefreshLeft /></el-icon>
+      </button>
+      <button class="action-btn" :disabled="!canRedo" @click="$emit('redo')" title="重做">
+        <el-icon><RefreshRight /></el-icon>
+      </button>
+      <button class="action-btn" :disabled="!canBringForward" @click="$emit('bringForward')" title="上移一层">
+        <el-icon><Top /></el-icon>
+      </button>
+      <button class="action-btn" :disabled="!canSendBackward" @click="$emit('sendBackward')" title="下移一层">
+        <el-icon><Bottom /></el-icon>
+      </button>
+      <button class="action-btn danger" :disabled="!canDelete" @click="$emit('delete')" title="删除">
+        <el-icon><Delete /></el-icon>
+      </button>
     </div>
 
-    <div class="section">
-      <div class="title">辅助</div>
-      <div class="assist">
-        <button class="assist-btn" :disabled="!canUndo" @click="$emit('undo')">
-          <el-icon><RefreshLeft /></el-icon>
-        </button>
-        <button class="assist-btn" :disabled="!canRedo" @click="$emit('redo')">
-          <el-icon><RefreshRight /></el-icon>
-        </button>
-      </div>
-      <div class="assist">
-        <button class="assist-btn" :class="{ active: panMode }" @click="$emit('update:panMode', !panMode)">
-          平移
-        </button>
-      </div>
-      <div class="zoom">{{ zoomPercent }}%</div>
-    </div>
+    <div class="zoom-display">{{ zoomPercent }}%</div>
   </aside>
 </template>
 
 <style scoped>
 .toolbar-wrap {
-  width: 136px;
+  width: 140px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 10px 8px;
-  background: #ffffff;
-  border-right: 1px solid #e5e7eb;
+  gap: 10px;
+  padding: 12px 10px;
+  margin: 10px 0 10px 10px;
+  background: var(--cd-bg-card);
+  border-radius: var(--cd-radius-lg);
+  box-shadow: var(--cd-shadow-md);
   overflow-y: auto;
+  max-height: calc(100vh - 52px - 30px - 40px);
+}
+
+.toolbar-wrap::-webkit-scrollbar {
+  width: 3px;
+}
+
+.toolbar-wrap::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 3px;
 }
 
 .tools {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 6px;
+  gap: 4px;
 }
 
 .tool-btn {
-  width: 40px;
-  height: 40px;
-  border-radius: 8px;
-  border: 1px solid transparent;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--cd-radius-md);
+  border: none;
   background: transparent;
-  color: #595959;
+  color: var(--cd-text-secondary);
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: background var(--cd-transition), color var(--cd-transition),
+    transform var(--cd-transition);
+}
+
+.tool-btn:hover {
+  background: var(--cd-primary-light);
+  color: var(--cd-primary);
 }
 
 .tool-btn.active {
-  background: #1890ff;
+  background: var(--cd-primary);
   color: #ffffff;
+  box-shadow: 0 2px 8px rgba(79, 110, 247, 0.3);
 }
 
 .tool-btn.danger:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: not-allowed;
+}
+
+.separator {
+  height: 1px;
+  background: var(--cd-border);
+  margin: 2px 4px;
 }
 
 .section {
@@ -180,59 +204,89 @@ const setTool = (tool: CanvasTool) => {
   gap: 6px;
 }
 
-.title {
-  font-size: 12px;
-  color: #6b7280;
+.section-label {
+  font-size: 11px;
+  color: var(--cd-text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
-.width-list {
+.width-row {
   display: flex;
-  flex-direction: column;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.width-chip {
+  min-width: 28px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--cd-border);
+  border-radius: 6px;
+  background: var(--cd-bg-card);
+  font-size: 12px;
+  color: var(--cd-text-secondary);
+  cursor: pointer;
+  transition: border-color var(--cd-transition), color var(--cd-transition),
+    background var(--cd-transition);
+}
+
+.width-chip:hover {
+  border-color: var(--cd-primary);
+}
+
+.width-chip.active {
+  border-color: var(--cd-primary);
+  color: var(--cd-primary);
+  background: var(--cd-primary-light);
+  font-weight: 600;
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
   gap: 4px;
 }
 
-.width-btn {
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  background: #fff;
-  font-size: 13px;
-  height: 28px;
-  cursor: pointer;
-}
-
-.width-btn.active {
-  border-color: #1890ff;
-  color: #1890ff;
-}
-
-.assist {
-  display: flex;
-  gap: 6px;
-}
-
-.assist-btn {
-  width: 36px;
+.action-btn {
+  width: 32px;
   height: 32px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  background: #fff;
+  border: 1px solid var(--cd-border);
+  border-radius: var(--cd-radius-sm);
+  background: var(--cd-bg-card);
+  color: var(--cd-text-secondary);
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: border-color var(--cd-transition), color var(--cd-transition),
+    background var(--cd-transition);
 }
 
-.assist-btn:disabled {
-  opacity: 0.4;
+.action-btn:hover:not(:disabled) {
+  border-color: var(--cd-primary);
+  color: var(--cd-primary);
+  background: var(--cd-primary-light);
+}
+
+.action-btn:disabled {
+  opacity: 0.3;
   cursor: not-allowed;
 }
 
-.assist-btn.active {
-  border-color: #1890ff;
-  color: #1890ff;
-  background: #eff6ff;
+.action-btn.danger:hover:not(:disabled) {
+  border-color: #dc2626;
+  color: #dc2626;
+  background: #fef2f2;
 }
 
-.zoom {
-  font-size: 16px;
-  font-weight: 500;
-  color: #6b7280;
+.zoom-display {
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--cd-text-muted);
+  padding: 4px 0;
 }
 </style>
