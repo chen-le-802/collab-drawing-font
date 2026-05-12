@@ -56,19 +56,22 @@ const recentConflictsText = computed(() => `最近冲突: ${props.recentConflict
 <style scoped>
 .status-bar {
   height: 30px;
-  background: rgba(255, 255, 255, 0.85);
-  backdrop-filter: blur(8px);
-  box-shadow: 0 -1px 8px rgba(0, 0, 0, 0.03);
+  background: rgba(255, 255, 255, 0.92);
+  border-top: 1px solid var(--cd-border);
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 10px;
   padding: 0 14px;
   font-size: 11px;
-  color: var(--cd-text-muted);
+  color: var(--cd-text-secondary);
+  overflow-x: auto;
 }
 
 .item {
   white-space: nowrap;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #f8f9fc;
 }
 
 .zoom {
@@ -89,10 +92,12 @@ const recentConflictsText = computed(() => `最近冲突: ${props.recentConflict
 }
 
 .status.connected {
-  color: #16a34a;
+  color: #16806d;
+  background: #e7f8f4;
 }
 
 .status.disconnected {
   color: #dc2626;
+  background: #fff1f1;
 }
 </style>

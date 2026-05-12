@@ -3547,7 +3547,10 @@ onBeforeUnmount(() => {
   height: 100vh;
   display: grid;
   grid-template-rows: 52px 1fr 30px;
-  background: var(--cd-bg-page);
+  background:
+    radial-gradient(circle at 16% 12%, rgba(255, 107, 107, 0.06), transparent 24%),
+    radial-gradient(circle at 84% 10%, rgba(49, 211, 189, 0.08), transparent 28%),
+    var(--cd-bg-page);
   overflow: hidden;
 }
 
@@ -3561,17 +3564,18 @@ onBeforeUnmount(() => {
 .canvas-area {
   min-width: 0;
   min-height: 0;
-  padding: 10px;
+  padding: 10px 12px;
 }
 
 .canvas-container {
   width: 100%;
   height: 100%;
-  border: 1px solid var(--cd-border);
-  border-radius: var(--cd-radius-md);
+  border: 1px solid rgba(226, 230, 239, 0.94);
+  border-radius: var(--cd-radius-lg);
   background: #ffffff;
   overflow: hidden;
   position: relative;
+  box-shadow: var(--cd-shadow-card);
 }
 
 .draw-canvas {
@@ -3592,13 +3596,13 @@ onBeforeUnmount(() => {
 .text-editor-input {
   width: 180px;
   height: 30px;
-  border: 1px solid #60a5fa;
-  border-radius: 6px;
+  border: 1px solid var(--cd-primary);
+  border-radius: 8px;
   padding: 4px 8px;
   font-size: 14px;
-  color: #111827;
+  color: var(--cd-text-primary);
   background: #ffffff;
-  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.12);
+  box-shadow: 0 12px 24px rgba(20, 30, 55, 0.14);
 }
 
 .reconnect-bar {
@@ -3612,11 +3616,11 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding: 8px 14px;
   border: 1px solid #fcd34d;
-  border-radius: var(--cd-radius-sm);
+  border-radius: 999px;
   background: #fef3c7;
   color: #92400e;
   font-size: 13px;
-  box-shadow: var(--cd-shadow-md);
+  box-shadow: var(--cd-shadow-card);
 }
 
 .reconnect-bar.failed {
@@ -3671,9 +3675,9 @@ onBeforeUnmount(() => {
 
 .history-row {
   border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  border-radius: 12px;
   padding: 8px 10px;
-  background: #fafafa;
+  background: #f8f9fc;
 }
 
 .history-main {
@@ -3734,9 +3738,9 @@ onBeforeUnmount(() => {
 
 .conflict-row {
   border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  border-radius: 12px;
   padding: 8px 10px;
-  background: #fafafa;
+  background: #f8f9fc;
 }
 
 .conflict-head {
@@ -3797,9 +3801,9 @@ onBeforeUnmount(() => {
 
 .version-row {
   border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  border-radius: 12px;
   padding: 8px 10px;
-  background: #fafafa;
+  background: #f8f9fc;
 }
 
 .version-head {

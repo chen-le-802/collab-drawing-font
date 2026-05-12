@@ -54,8 +54,8 @@ const handleCommand = async (command: string) => {
 <template>
   <header class="app-header">
     <div class="logo" @click="handleLogoClick">
-      <span class="logo-mark">CD</span>
-      <span class="logo-text">Collab Drawing</span>
+      <span class="logo-mark" aria-hidden="true"></span>
+      <span class="logo-text">画协</span>
     </div>
 
     <el-menu
@@ -106,17 +106,14 @@ const handleCommand = async (command: string) => {
 }
 
 .logo-mark {
-  width: 36px;
-  height: 36px;
+  width: 42px;
+  height: 42px;
   border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
-  color: #ffffff;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.6px;
+  display: block;
+  background-image: url('/logo.png');
+  background-repeat: no-repeat;
+  background-size: contain;
+  background-position: center;
 }
 
 .logo-text {

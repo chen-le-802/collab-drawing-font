@@ -32,7 +32,6 @@ declare module 'vue' {
     ElSelect: typeof import('element-plus/es')['ElSelect']
     ElSkeleton: typeof import('element-plus/es')['ElSkeleton']
     ElSwitch: typeof import('element-plus/es')['ElSwitch']
-    ElTag: typeof import('element-plus/es')['ElTag']
     ElUpload: typeof import('element-plus/es')['ElUpload']
     MemberPanel: typeof import('./src/components/sidebar/MemberPanel.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']

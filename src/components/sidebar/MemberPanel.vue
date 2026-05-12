@@ -158,9 +158,10 @@ const canTransferCreator = (member: MemberVO) => {
 .member-panel {
   width: 210px;
   margin: 10px 10px 10px 0;
-  background: var(--cd-bg-card);
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(226, 230, 239, 0.92);
   border-radius: var(--cd-radius-lg);
-  box-shadow: var(--cd-shadow-md);
+  box-shadow: var(--cd-shadow-card);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -168,7 +169,7 @@ const canTransferCreator = (member: MemberVO) => {
 
 .member-panel.collapsed {
   width: 44px;
-  border-radius: var(--cd-radius-md);
+  border-radius: 14px;
 }
 
 .panel-header {
@@ -188,7 +189,7 @@ const canTransferCreator = (member: MemberVO) => {
 
 .title {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 700;
   margin: 0;
   color: var(--cd-text-primary);
 }
@@ -216,12 +217,14 @@ const canTransferCreator = (member: MemberVO) => {
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border-radius: var(--cd-radius-md);
-  transition: background var(--cd-transition);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  transition: background var(--cd-transition), border-color var(--cd-transition);
 }
 
 .member-item:hover {
-  background: var(--cd-primary-lighter);
+  background: #f8f9fc;
+  border-color: var(--cd-border);
 }
 
 .meta {
@@ -253,8 +256,8 @@ const canTransferCreator = (member: MemberVO) => {
 }
 
 .dot-online {
-  background: #22c55e;
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+  background: var(--cd-accent-mint);
+  box-shadow: 0 0 0 3px rgba(49, 211, 189, 0.18);
   animation: pulse-green 2s infinite;
 }
 

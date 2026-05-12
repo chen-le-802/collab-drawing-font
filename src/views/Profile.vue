@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import type { UploadProps } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { ArrowLeft, Lock, Plus, User } from '@element-plus/icons-vue'
 import { userApi } from '@/api/user'
 import { useAuthStore } from '@/stores/auth'
 import type { UpdateProfileDTO, UserVO } from '@/types/user'
@@ -222,29 +222,33 @@ onBeforeUnmount(() => {
   <div class="profile-page">
     <header class="profile-header">
       <div class="header-left" @click="$router.push('/')">
-        <span class="header-logo">CD</span>
-        <span class="header-title">Collab Drawing</span>
+        <span class="header-logo" aria-hidden="true"></span>
+        <span class="header-title">画协</span>
       </div>
-      <button class="back-btn" @click="$router.push('/')">&#8592; 返回首页</button>
+      <button class="back-btn" @click="$router.push('/')">
+        <el-icon><ArrowLeft /></el-icon>
+        返回首页
+      </button>
     </header>
 
     <main class="profile-body" v-loading="initLoading">
-      <div class="profile-banner">
-        <div class="banner-circle"></div>
-        <div class="banner-content">
+      <section class="identity-card">
           <el-avatar :size="80" :src="avatarPreview" class="banner-avatar">
             {{ form.username.slice(0, 1).toUpperCase() }}
           </el-avatar>
-          <div class="banner-info">
+          <div class="identity-info">
+            <div class="eyebrow">Account</div>
             <h2 class="banner-name">{{ currentUser?.username || '用户' }}</h2>
             <p class="banner-time">注册于 {{ registerTimeText }}</p>
           </div>
-        </div>
-      </div>
+      </section>
 
       <div class="profile-sections">
         <section class="section-card">
-          <h3 class="section-title">基本信息</h3>
+          <div class="section-heading">
+            <el-icon><User /></el-icon>
+            <h3 class="section-title">基本信息</h3>
+          </div>
           <el-form ref="formRef" :model="form" :rules="rules" label-width="90px" class="profile-form">
             <el-form-item label="用户名" prop="username">
               <el-input v-model="form.username" maxlength="20" show-word-limit />
@@ -274,7 +278,10 @@ onBeforeUnmount(() => {
         </section>
 
         <section class="section-card">
-          <h3 class="section-title">安全设置</h3>
+          <div class="section-heading">
+            <el-icon><Lock /></el-icon>
+            <h3 class="section-title">安全设置</h3>
+          </div>
           <el-form ref="passwordFormRef" :model="passwordForm" :rules="passwordRules" label-width="90px" class="profile-form">
             <el-form-item label="当前密码" prop="currentPassword">
               <el-input
@@ -319,7 +326,10 @@ onBeforeUnmount(() => {
 <style scoped>
 .profile-page {
   min-height: 100vh;
-  background: var(--cd-bg-page);
+  background:
+    radial-gradient(circle at 18% 12%, rgba(255, 107, 107, 0.08), transparent 26%),
+    radial-gradient(circle at 84% 18%, rgba(49, 211, 189, 0.1), transparent 30%),
+    var(--cd-bg-page);
 }
 
 .profile-header {
@@ -329,7 +339,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   background: var(--cd-bg-card);
-  box-shadow: var(--cd-shadow-sm);
+  border-bottom: 1px solid var(--cd-border);
   position: sticky;
   top: 0;
   z-index: 10;
@@ -343,16 +353,14 @@ onBeforeUnmount(() => {
 }
 
 .header-logo {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 700;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: block;
+  background-image: url('/logo.png');
+  background-repeat: no-repeat;
+  background-size: contain;
+  background-position: center;
 }
 
 .header-title {
@@ -362,10 +370,13 @@ onBeforeUnmount(() => {
 }
 
 .back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--cd-border);
-  border-radius: var(--cd-radius-sm);
+  border-radius: 999px;
   background: var(--cd-bg-card);
-  padding: 6px 16px;
+  padding: 7px 14px;
   font-size: 13px;
   color: var(--cd-text-secondary);
   cursor: pointer;
@@ -378,57 +389,57 @@ onBeforeUnmount(() => {
 }
 
 .profile-body {
-  max-width: 800px;
+  max-width: 980px;
   margin: 0 auto;
-  padding: 32px 24px;
+  padding: 30px 24px;
 }
 
-.profile-banner {
-  position: relative;
-  height: 160px;
-  border-radius: var(--cd-radius-xl);
-  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 50%, #a78bfa 100%);
-  overflow: hidden;
-  margin-bottom: 60px;
-}
-
-.banner-circle {
-  position: absolute;
-  width: 300px;
-  height: 300px;
-  border-radius: 50%;
-  top: -100px;
-  right: -50px;
-  background: radial-gradient(circle, rgba(248, 200, 220, 0.3) 0%, transparent 70%);
-}
-
-.banner-content {
-  position: absolute;
-  bottom: -40px;
-  left: 32px;
+.identity-card {
+  min-height: 156px;
+  padding: 26px;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 18px;
+  margin-bottom: 22px;
+  border-radius: var(--cd-radius-xl);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(255, 255, 255, 0.76)),
+    radial-gradient(circle at 92% 12%, rgba(98, 183, 255, 0.2), transparent 34%),
+    radial-gradient(circle at 12% 100%, rgba(255, 107, 107, 0.14), transparent 32%);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: var(--cd-shadow-card);
 }
 
 .banner-avatar {
-  border: 4px solid var(--cd-bg-card);
-  box-shadow: var(--cd-shadow-md);
+  border: 5px solid #ffffff;
+  box-shadow: 0 16px 34px rgba(20, 30, 55, 0.12);
   background: var(--cd-primary-light);
   color: var(--cd-primary);
   font-weight: 700;
   font-size: 28px;
 }
 
-.banner-info {
-  padding-bottom: 6px;
+.identity-info {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin-bottom: 8px;
+  color: var(--cd-text-muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .banner-name {
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 30px;
+  line-height: 1.15;
+  font-weight: 800;
   color: var(--cd-text-primary);
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .banner-time {
@@ -438,25 +449,38 @@ onBeforeUnmount(() => {
 }
 
 .profile-sections {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
 }
 
 .section-card {
-  background: var(--cd-bg-card);
+  background: rgba(255, 255, 255, 0.78);
   border-radius: var(--cd-radius-lg);
-  box-shadow: var(--cd-shadow-sm);
-  padding: 28px 32px;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: var(--cd-shadow-card);
+  padding: 24px 26px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--cd-border);
+}
+
+.section-heading .el-icon {
+  color: var(--cd-primary);
 }
 
 .section-title {
   font-size: 16px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--cd-text-primary);
-  margin: 0 0 20px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--cd-border);
+  margin: 0;
 }
 
 .profile-form {
@@ -483,12 +507,21 @@ onBeforeUnmount(() => {
     padding: 20px 12px;
   }
 
+  .profile-sections {
+    grid-template-columns: 1fr;
+  }
+
   .section-card {
     padding: 20px 16px;
   }
 
-  .banner-content {
-    left: 16px;
+  .identity-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .banner-name {
+    font-size: 24px;
   }
 }
 </style>

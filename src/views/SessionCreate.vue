@@ -128,16 +128,16 @@ const handleConfirm = async () => {
   padding: 10px 24px;
   border: none;
   border-radius: var(--cd-radius-sm);
-  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
+  background: #202331;
   color: #ffffff;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity var(--cd-transition), transform var(--cd-transition);
+  transition: background var(--cd-transition), transform var(--cd-transition);
 }
 
 .btn-confirm:hover {
-  opacity: 0.9;
+  background: #111827;
   transform: translateY(-1px);
 }
 

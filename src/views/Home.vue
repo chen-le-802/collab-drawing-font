@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import {
+  CirclePlus,
+  Clock,
+  Collection,
+  Grid,
+  Search,
+  SwitchButton,
+  UserFilled,
+  Tickets,
+} from '@element-plus/icons-vue'
 import SessionCard from '@/components/session/SessionCard.vue'
 import SessionCreate from '@/views/SessionCreate.vue'
 import { graphicApi } from '@/api/graphic'
@@ -20,9 +30,13 @@ const sessions = ref<SessionVO[]>([])
 const currentUserId = ref<number>()
 const searchKeyword = ref('')
 const sortBy = ref<'created_desc' | 'created_asc' | 'name_asc' | 'name_desc' | 'version_desc'>('created_desc')
+const compactCards = ref(false)
 
 const isMyCreatedTab = computed(() => route.path.startsWith('/my-sessions'))
 const listTitle = computed(() => (isMyCreatedTab.value ? '我创建的会话' : '我加入的会话'))
+const pageSubtitle = computed(() =>
+  isMyCreatedTab.value ? '管理你发起的协作画布与邀请链接' : '继续最近参与的团队画布',
+)
 const emptyDescription = computed(() =>
   isMyCreatedTab.value ? '暂无你创建的会话，点击左侧创建新会话' : '暂无会话，点击左侧创建新会话',
 )
@@ -61,6 +75,58 @@ const emptyDisplayText = computed(() => {
   }
   return '没有匹配的会话，试试其他关键词'
 })
+const visibleMemberIds = computed(() => {
+  const ids = new Set<number>()
+  sessions.value.forEach((session) => {
+    if (session.creatorId) {
+      ids.add(session.creatorId)
+    }
+    ;(session.memberPreviews ?? []).forEach((member) => ids.add(member.userId))
+  })
+  return ids
+})
+const visibleOnlineMemberIds = computed(() => {
+  const ids = new Set<number>()
+  sessions.value.forEach((session) => {
+    ;(session.memberPreviews ?? []).forEach((member) => {
+      if (member.isOnline) {
+        ids.add(member.userId)
+      }
+    })
+  })
+  return ids
+})
+const visibleMemberCount = computed(() => visibleMemberIds.value.size)
+const visibleOnlineMemberCount = computed(() => visibleOnlineMemberIds.value.size)
+const activeSessions = computed(() => sessions.value.filter((item) => item.status === 1).length)
+const latestSession = computed(() => {
+  if (sessions.value.length === 0) {
+    return null
+  }
+  return [...sessions.value].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  )[0] ?? null
+})
+const summaryCards = computed(() => [
+  {
+    label: '全部会话',
+    value: sessions.value.length,
+    hint: isMyCreatedTab.value ? '由你创建' : '已加入',
+    tone: 'coral',
+  },
+  {
+    label: '活跃画布',
+    value: activeSessions.value,
+    hint: '可继续协作',
+    tone: 'mint',
+  },
+  {
+    label: '在线成员',
+    value: visibleOnlineMemberCount.value,
+    hint: `已识别成员 ${visibleMemberCount.value}`,
+    tone: 'sky',
+  },
+])
 const THUMBNAIL_WIDTH = 320
 const THUMBNAIL_HEIGHT = 180
 const THUMBNAIL_PADDING = 18
@@ -336,6 +402,10 @@ const openCreateDialog = () => {
   createVisible.value = true
 }
 
+const toggleCompactCards = () => {
+  compactCards.value = !compactCards.value
+}
+
 const handleOpenSession = (session: SessionVO) => {
   router.push(`/session/${session.sessionKey}`)
 }
@@ -447,23 +517,23 @@ watch(
     <aside class="sidebar">
       <div class="sidebar-top">
         <div class="sidebar-logo" @click="$router.push('/')">
-          <span class="logo-mark">CD</span>
-          <span class="logo-text">Collab Drawing</span>
+          <span class="logo-mark" aria-hidden="true"></span>
+          <span class="logo-text">画协</span>
         </div>
 
         <nav class="sidebar-nav">
           <router-link to="/" class="nav-item" :class="{ active: !isMyCreatedTab }">
-            <span class="nav-icon">&#9776;</span>
+            <el-icon class="nav-icon"><Collection /></el-icon>
             <span>我加入的会话</span>
           </router-link>
           <router-link to="/my-sessions" class="nav-item" :class="{ active: isMyCreatedTab }">
-            <span class="nav-icon">&#9733;</span>
+            <el-icon class="nav-icon"><UserFilled /></el-icon>
             <span>我创建的会话</span>
           </router-link>
         </nav>
 
         <button class="create-btn" @click="openCreateDialog">
-          <span class="create-btn-icon">+</span>
+          <el-icon><CirclePlus /></el-icon>
           创建新会话
         </button>
       </div>
@@ -478,16 +548,54 @@ watch(
             <div class="user-role">个人中心</div>
           </div>
         </div>
-        <button class="logout-btn" @click="handleLogout" title="退出登录">&#x23FB;</button>
+        <button class="logout-btn" @click="handleLogout" title="退出登录">
+          <el-icon><SwitchButton /></el-icon>
+        </button>
       </div>
     </aside>
 
     <main class="main-content">
-      <div class="main-header">
-        <h2 class="main-title">{{ listTitle }}</h2>
-        <div class="main-tools">
-          <div class="search-box">
-            <span class="search-icon">&#128269;</span>
+      <section class="overview-panel">
+        <div class="overview-copy">
+          <div class="eyebrow">Workspace</div>
+          <h1 class="main-title">{{ listTitle }}</h1>
+          <p class="main-subtitle">{{ pageSubtitle }}</p>
+          <div v-if="latestSession" class="latest-session">
+            <el-icon><Clock /></el-icon>
+            <span>最近创建：{{ latestSession.name }}</span>
+          </div>
+        </div>
+        <div class="summary-grid">
+          <div
+            v-for="card in summaryCards"
+            :key="card.label"
+            class="summary-card"
+            :class="`summary-${card.tone}`"
+          >
+            <div class="summary-label">{{ card.label }}</div>
+            <div class="summary-value">{{ card.value }}</div>
+            <div class="summary-hint">{{ card.hint }}</div>
+          </div>
+        </div>
+      </section>
+
+      <div class="list-panel">
+        <div class="main-header">
+          <div>
+            <h2 class="list-title">画布列表</h2>
+            <p class="list-subtitle">{{ displayedSessions.length }} 个结果</p>
+          </div>
+          <div class="main-tools">
+            <button
+              class="view-toggle"
+              type="button"
+              @click="toggleCompactCards"
+            >
+              <el-icon><Tickets /></el-icon>
+              {{ compactCards ? '展开卡片' : '紧凑卡片' }}
+            </button>
+            <div class="search-box">
+              <el-icon class="search-icon"><Search /></el-icon>
             <input
               v-model="searchKeyword"
               class="search-input"
@@ -504,39 +612,38 @@ watch(
         </div>
       </div>
 
-      <el-skeleton :loading="loading" animated :count="3">
-        <template #template>
-          <div class="session-grid">
-            <div v-for="item in 6" :key="item" class="skeleton-card">
-              <div class="skeleton-thumb"></div>
-              <div class="skeleton-line skeleton-line-short"></div>
-              <div class="skeleton-line"></div>
+        <el-skeleton :loading="loading" animated :count="3">
+          <template #template>
+            <div class="session-grid" :class="{ compact: compactCards }">
+              <div v-for="item in 6" :key="item" class="skeleton-card">
+                <div class="skeleton-thumb"></div>
+                <div class="skeleton-line skeleton-line-short"></div>
+                <div class="skeleton-line"></div>
+              </div>
             </div>
-          </div>
-        </template>
-        <template #default>
-          <div v-if="displayedSessions.length === 0" class="empty-state">
-            <div class="empty-icon">&#128196;</div>
-            <p class="empty-text">{{ emptyDisplayText }}</p>
-          </div>
-          <div v-else class="session-grid">
-            <session-card
-              v-for="session in displayedSessions"
-              :key="session.sessionKey"
-              :session="session"
-              :is-creator="isSessionCreator(session)"
-              @open="handleOpenSession"
-              @copy="handleCopyLink"
-              @delete="handleDeleteSession"
-              @leave="handleLeaveSession"
-            />
-          </div>
-        </template>
-      </el-skeleton>
+          </template>
+          <template #default>
+            <div v-if="displayedSessions.length === 0" class="empty-state">
+              <el-icon class="empty-icon"><Grid /></el-icon>
+              <p class="empty-text">{{ emptyDisplayText }}</p>
+            </div>
+            <div v-else class="session-grid" :class="{ compact: compactCards }">
+              <session-card
+                v-for="session in displayedSessions"
+                :key="session.sessionKey"
+                :session="session"
+                :is-creator="isSessionCreator(session)"
+                :compact="compactCards"
+                @open="handleOpenSession"
+                @copy="handleCopyLink"
+                @delete="handleDeleteSession"
+                @leave="handleLeaveSession"
+              />
+            </div>
+          </template>
+        </el-skeleton>
+      </div>
     </main>
-
-    <div class="decor-circle decor-circle-1"></div>
-    <div class="decor-circle decor-circle-2"></div>
 
     <session-create v-model="createVisible" @created="handleSessionCreated" />
   </div>
@@ -544,47 +651,24 @@ watch(
 
 <style scoped>
 .home-page {
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
   background: var(--cd-bg-page);
   position: relative;
   overflow: hidden;
 }
 
-.decor-circle {
-  position: fixed;
-  border-radius: 50%;
-  pointer-events: none;
-  z-index: 0;
-}
-
-.decor-circle-1 {
-  width: 600px;
-  height: 600px;
-  top: -200px;
-  right: -150px;
-  background: radial-gradient(circle, rgba(248, 200, 220, 0.3) 0%, transparent 70%);
-}
-
-.decor-circle-2 {
-  width: 450px;
-  height: 450px;
-  bottom: -180px;
-  left: 200px;
-  background: radial-gradient(circle, rgba(196, 181, 253, 0.18) 0%, transparent 70%);
-}
-
 /* Sidebar */
 .sidebar {
-  width: 260px;
+  height: 100vh;
+  width: 248px;
   flex-shrink: 0;
   background: var(--cd-bg-card);
-  border-radius: 0 var(--cd-radius-xl) var(--cd-radius-xl) 0;
-  box-shadow: var(--cd-shadow-md);
+  border-right: 1px solid var(--cd-border);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 24px 18px;
+  padding: 22px 18px;
   position: relative;
   z-index: 2;
 }
@@ -604,17 +688,14 @@ watch(
 }
 
 .logo-mark {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
-  color: #ffffff;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: block;
+  background-image: url('/logo.png');
+  background-repeat: no-repeat;
+  background-size: contain;
+  background-position: center;
 }
 
 .logo-text {
@@ -633,7 +714,7 @@ watch(
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 14px;
+  padding: 11px 12px;
   border-radius: var(--cd-radius-md);
   font-size: 14px;
   color: var(--cd-text-secondary);
@@ -647,15 +728,14 @@ watch(
 }
 
 .nav-item.active {
-  background: var(--cd-primary-light);
-  color: var(--cd-primary);
+  background: #eef3ff;
+  color: #1f4fbd;
   font-weight: 600;
 }
 
 .nav-icon {
-  font-size: 16px;
+  font-size: 17px;
   width: 20px;
-  text-align: center;
 }
 
 .create-btn {
@@ -667,22 +747,17 @@ watch(
   height: 44px;
   border: none;
   border-radius: var(--cd-radius-md);
-  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
+  background: #202331;
   color: #ffffff;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity var(--cd-transition), transform var(--cd-transition);
+  transition: background var(--cd-transition), transform var(--cd-transition);
 }
 
 .create-btn:hover {
-  opacity: 0.9;
+  background: #111827;
   transform: translateY(-1px);
-}
-
-.create-btn-icon {
-  font-size: 18px;
-  font-weight: 300;
 }
 
 .sidebar-bottom {
@@ -739,7 +814,7 @@ watch(
   border-radius: var(--cd-radius-sm);
   background: transparent;
   color: var(--cd-text-muted);
-  font-size: 16px;
+  font-size: 15px;
   cursor: pointer;
   transition: background var(--cd-transition), color var(--cd-transition);
 }
@@ -752,10 +827,183 @@ watch(
 /* Main content */
 .main-content {
   flex: 1;
+  height: 100vh;
   min-width: 0;
-  padding: 32px 36px;
+  padding: 26px 30px;
   position: relative;
   z-index: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.main-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.main-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.main-content::-webkit-scrollbar-thumb {
+  background: rgba(154, 161, 173, 0.32);
+  border-radius: 999px;
+}
+
+.main-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(154, 161, 173, 0.48);
+}
+
+.overview-panel {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(360px, 0.95fr);
+  gap: 20px;
+  align-items: stretch;
+  margin-bottom: 22px;
+}
+
+.overview-copy {
+  min-height: 180px;
+  padding: 28px 30px;
+  border-radius: var(--cd-radius-xl);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.78)),
+    radial-gradient(circle at 82% 18%, rgba(49, 211, 189, 0.22), transparent 34%),
+    radial-gradient(circle at 16% 88%, rgba(255, 107, 107, 0.18), transparent 30%);
+  border: 1px solid rgba(255, 255, 255, 0.84);
+  box-shadow: var(--cd-shadow-card);
+}
+
+.eyebrow {
+  margin-bottom: 12px;
+  color: var(--cd-text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.main-title {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.2;
+  font-weight: 800;
+  color: var(--cd-text-primary);
+}
+
+.main-subtitle {
+  margin: 8px 0 0;
+  color: var(--cd-text-secondary);
+  font-size: 14px;
+}
+
+.latest-session {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  margin-top: 28px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--cd-text-secondary);
+  font-size: 13px;
+  box-shadow: 0 8px 18px rgba(20, 30, 55, 0.05);
+}
+
+.latest-session span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summary-card {
+  min-height: 180px;
+  padding: 20px;
+  border-radius: var(--cd-radius-xl);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 16px 36px rgba(20, 30, 55, 0.06);
+  color: #202331;
+  overflow: hidden;
+  position: relative;
+}
+
+.summary-card::after {
+  content: '';
+  position: absolute;
+  inset: auto -42px -56px auto;
+  width: 150px;
+  height: 150px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.42);
+  filter: blur(2px);
+}
+
+.summary-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.08));
+  pointer-events: none;
+}
+
+.summary-coral {
+  background:
+    radial-gradient(circle at 88% 82%, rgba(255, 255, 255, 0.48), transparent 34%),
+    radial-gradient(circle at 12% 14%, rgba(255, 255, 255, 0.58), transparent 26%),
+    linear-gradient(145deg, #fff4f5 0%, #ffc5ce 54%, #ff8f97 100%);
+}
+
+.summary-mint {
+  background:
+    radial-gradient(circle at 88% 82%, rgba(255, 255, 255, 0.42), transparent 34%),
+    radial-gradient(circle at 14% 16%, rgba(255, 255, 255, 0.58), transparent 26%),
+    linear-gradient(145deg, #edfffb 0%, #afeee4 54%, #58d7c7 100%);
+}
+
+.summary-sky {
+  background:
+    radial-gradient(circle at 88% 82%, rgba(255, 255, 255, 0.42), transparent 34%),
+    radial-gradient(circle at 14% 16%, rgba(255, 255, 255, 0.58), transparent 26%),
+    linear-gradient(145deg, #f2fbff 0%, #bddfff 54%, #67b4f7 100%);
+}
+
+.summary-label {
+  position: relative;
+  z-index: 1;
+  color: #323644;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.summary-value {
+  position: relative;
+  z-index: 1;
+  margin-top: 42px;
+  font-size: 42px;
+  line-height: 1;
+  font-weight: 800;
+}
+
+.summary-hint {
+  position: relative;
+  z-index: 1;
+  margin-top: 8px;
+  color: rgba(32, 35, 49, 0.72);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.list-panel {
+  padding: 22px;
+  border-radius: var(--cd-radius-xl);
+  background: rgba(255, 255, 255, 0.64);
+  border: 1px solid rgba(255, 255, 255, 0.86);
+  box-shadow: var(--cd-shadow-card);
 }
 
 .main-header {
@@ -763,15 +1011,21 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 28px;
+  margin-bottom: 18px;
   flex-wrap: wrap;
 }
 
-.main-title {
+.list-title {
   margin: 0;
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 700;
   color: var(--cd-text-primary);
+}
+
+.list-subtitle {
+  margin: 4px 0 0;
+  color: var(--cd-text-muted);
+  font-size: 12px;
 }
 
 .main-tools {
@@ -780,15 +1034,36 @@ watch(
   gap: 10px;
 }
 
+.view-toggle {
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px;
+  border: 1px solid var(--cd-border);
+  border-radius: 999px;
+  background: var(--cd-bg-card);
+  color: var(--cd-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--cd-transition), color var(--cd-transition), box-shadow var(--cd-transition);
+}
+
+.view-toggle:hover {
+  border-color: var(--cd-primary);
+  color: var(--cd-primary);
+  box-shadow: 0 0 0 3px rgba(79, 110, 247, 0.08);
+}
+
 .search-box {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 0 14px;
-  height: 36px;
+  height: 38px;
   background: var(--cd-bg-card);
-  border-radius: 20px;
-  box-shadow: var(--cd-shadow-sm);
+  border-radius: 999px;
   border: 1px solid var(--cd-border);
   transition: border-color var(--cd-transition), box-shadow var(--cd-transition);
 }
@@ -799,7 +1074,7 @@ watch(
 }
 
 .search-icon {
-  font-size: 14px;
+  font-size: 15px;
   opacity: 0.5;
 }
 
@@ -817,18 +1092,55 @@ watch(
 }
 
 .sort-select {
-  width: 130px;
+  width: 152px;
+  height: 38px;
 }
 
+:deep(.sort-select .el-select__wrapper),
 :deep(.sort-select .el-input__wrapper) {
-  border-radius: 20px;
-  box-shadow: var(--cd-shadow-sm);
+  min-height: 38px;
+  padding: 0 12px 0 14px;
+  border-radius: 999px;
+  background: var(--cd-bg-card);
+  border: 1px solid var(--cd-border);
+  box-shadow: none !important;
+  transition: border-color var(--cd-transition), box-shadow var(--cd-transition);
+}
+
+:deep(.sort-select .el-select__wrapper:hover),
+:deep(.sort-select .el-input__wrapper:hover) {
+  border-color: var(--cd-border);
+  box-shadow: none !important;
+}
+
+:deep(.sort-select .el-select__wrapper.is-focused),
+:deep(.sort-select .el-input__wrapper.is-focus),
+:deep(.sort-select .el-input.is-focus .el-input__wrapper) {
+  border-color: var(--cd-primary);
+  box-shadow: 0 0 0 3px rgba(79, 110, 247, 0.08) !important;
+}
+
+:deep(.sort-select .el-select__selected-item),
+:deep(.sort-select .el-input__inner) {
+  height: 36px;
+  line-height: 36px;
+  color: var(--cd-text-primary);
+  font-size: 13px;
+}
+
+:deep(.sort-select .el-select__caret) {
+  color: var(--cd-text-muted);
 }
 
 .session-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 24px;
+  gap: 16px;
+}
+
+.session-grid.compact {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
 }
 
 .skeleton-card {
@@ -873,7 +1185,7 @@ watch(
 }
 
 .empty-icon {
-  font-size: 48px;
+  font-size: 42px;
   margin-bottom: 16px;
   opacity: 0.4;
 }
@@ -886,12 +1198,15 @@ watch(
 
 @media (max-width: 900px) {
   .home-page {
+    height: 100vh;
     flex-direction: column;
   }
 
   .sidebar {
+    height: auto;
     width: 100%;
-    border-radius: 0 0 var(--cd-radius-xl) var(--cd-radius-xl);
+    border-right: none;
+    border-bottom: 1px solid var(--cd-border);
     padding: 16px;
     flex-direction: row;
     align-items: center;
@@ -918,7 +1233,16 @@ watch(
   }
 
   .main-content {
+    height: calc(100vh - 77px);
     padding: 20px 16px;
+  }
+
+  .overview-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-grid {
+    grid-template-columns: 1fr;
   }
 
   .session-grid {
@@ -927,6 +1251,21 @@ watch(
 
   .search-input {
     width: 140px;
+  }
+
+  .main-tools {
+    width: 100%;
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .view-toggle,
+  .sort-select {
+    flex: 1 1 140px;
+  }
+
+  .search-box {
+    flex: 1 1 100%;
   }
 }
 </style>

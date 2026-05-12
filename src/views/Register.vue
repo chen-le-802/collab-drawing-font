@@ -67,33 +67,29 @@ const handleRegister = async () => {
 
 <template>
   <div class="auth-page">
-    <div class="brand-side">
-      <div class="brand-content">
-        <div class="brand-logo">CD</div>
-        <h1 class="brand-title">Collab Drawing</h1>
-        <p class="brand-desc">加入我们，与团队一起在画布上自由创作</p>
-        <div class="brand-features">
-          <div class="feature-item">
-            <span class="feature-icon">&#9998;</span>
-            <span>实时协作绘图</span>
-          </div>
-          <div class="feature-item">
-            <span class="feature-icon">&#9775;</span>
-            <span>版本历史管理</span>
-          </div>
-          <div class="feature-item">
-            <span class="feature-icon">&#9733;</span>
-            <span>一键分享邀请</span>
+    <div class="auth-shell">
+      <section class="brand-panel">
+        <div class="brand-row">
+          <div class="brand-logo" aria-hidden="true"></div>
+          <div>
+            <div class="brand-title">画协</div>
+            <div class="brand-desc">实时协作画布</div>
           </div>
         </div>
-      </div>
-      <div class="brand-circle brand-circle-1"></div>
-      <div class="brand-circle brand-circle-2"></div>
-      <div class="brand-circle brand-circle-3"></div>
-    </div>
+        <div class="brand-copy">
+          <h1>创建你的协作画布空间</h1>
+          <p>注册后即可发起会话，把草图、流程和灵感同步给团队成员。</p>
+        </div>
+        <div class="canvas-accent" aria-hidden="true">
+          <span class="accent-line accent-red"></span>
+          <span class="accent-line accent-blue"></span>
+          <span class="accent-line accent-mint"></span>
+          <span class="accent-dot dot-red"></span>
+          <span class="accent-dot dot-blue"></span>
+        </div>
+      </section>
 
-    <div class="form-side">
-      <div class="form-card">
+      <section class="form-card">
         <h2 class="form-title">创建账号</h2>
         <p class="form-subtitle">注册后即可开始协作绘图</p>
 
@@ -149,7 +145,7 @@ const handleRegister = async () => {
         <div class="footer">
           已有账号？<router-link to="/login">立即登录</router-link>
         </div>
-      </div>
+      </section>
     </div>
   </div>
 </template>
@@ -158,124 +154,160 @@ const handleRegister = async () => {
 .auth-page {
   min-height: 100vh;
   display: flex;
-}
-
-.brand-side {
-  flex: 1;
-  background: linear-gradient(135deg, #4f6ef7 0%, #7b93fa 50%, #a78bfa 100%);
-  display: flex;
   align-items: center;
   justify-content: center;
-  position: relative;
-  overflow: hidden;
-  padding: 60px;
+  padding: 32px;
+  background:
+    radial-gradient(circle at 15% 18%, rgba(255, 107, 107, 0.1), transparent 28%),
+    radial-gradient(circle at 78% 24%, rgba(49, 211, 189, 0.12), transparent 30%),
+    var(--cd-bg-page);
 }
 
-.brand-content {
+.auth-shell {
+  width: min(980px, 100%);
+  min-height: 600px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 420px;
+  overflow: hidden;
+  border-radius: 30px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.94);
+  box-shadow: var(--cd-shadow-lg);
+}
+
+.brand-panel {
   position: relative;
-  z-index: 2;
-  color: #ffffff;
-  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 42px;
+  overflow: hidden;
+  background:
+    linear-gradient(#edf1f8 1px, transparent 1px),
+    linear-gradient(90deg, #edf1f8 1px, transparent 1px),
+    linear-gradient(145deg, #ffffff 0%, #f5f8fc 100%);
+  background-size: 28px 28px, 28px 28px, auto;
+}
+
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .brand-logo {
   width: 64px;
   height: 64px;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.2);
-  backdrop-filter: blur(10px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 22px;
-  font-weight: 800;
-  letter-spacing: 1px;
-  margin-bottom: 28px;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  background-image: url('/logo.png');
+  background-repeat: no-repeat;
+  background-size: contain;
+  background-position: center;
 }
 
 .brand-title {
-  font-size: 36px;
+  color: var(--cd-text-primary);
+  font-size: 22px;
   font-weight: 800;
-  margin: 0 0 12px;
-  letter-spacing: -0.5px;
 }
 
 .brand-desc {
-  font-size: 16px;
-  line-height: 1.7;
-  opacity: 0.85;
-  margin: 0 0 36px;
+  margin-top: 3px;
+  color: var(--cd-text-muted);
+  font-size: 13px;
 }
 
-.brand-features {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
+.brand-copy {
+  position: relative;
+  z-index: 1;
+  max-width: 360px;
 }
 
-.feature-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+.brand-copy h1 {
+  margin: 0;
+  color: var(--cd-text-primary);
+  font-size: 34px;
+  line-height: 1.2;
+  font-weight: 800;
+}
+
+.brand-copy p {
+  margin: 14px 0 0;
+  color: var(--cd-text-secondary);
   font-size: 15px;
+  line-height: 1.8;
+}
+
+.canvas-accent {
+  position: absolute;
+  inset: auto 38px 34px auto;
+  width: 260px;
+  height: 170px;
   opacity: 0.9;
 }
 
-.feature-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.15);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-}
-
-.brand-circle {
+.accent-line,
+.accent-dot {
   position: absolute;
+  display: block;
+}
+
+.accent-line {
+  height: 5px;
+  border-radius: 999px;
+}
+
+.accent-red {
+  width: 190px;
+  left: 10px;
+  top: 82px;
+  background: var(--cd-accent-coral);
+  transform: rotate(-18deg);
+}
+
+.accent-blue {
+  width: 170px;
+  right: 0;
+  top: 44px;
+  background: var(--cd-accent-sky);
+  transform: rotate(18deg);
+}
+
+.accent-mint {
+  width: 150px;
+  left: 60px;
+  bottom: 24px;
+  background: var(--cd-accent-mint);
+  transform: rotate(8deg);
+}
+
+.accent-dot {
+  width: 42px;
+  height: 42px;
   border-radius: 50%;
-  pointer-events: none;
+  background: #ffffff;
 }
 
-.brand-circle-1 {
-  width: 500px;
-  height: 500px;
-  top: -150px;
-  right: -100px;
-  background: radial-gradient(circle, rgba(248, 200, 220, 0.3) 0%, transparent 70%);
+.dot-red {
+  left: 34px;
+  top: 42px;
+  border: 9px solid var(--cd-accent-coral);
 }
 
-.brand-circle-2 {
-  width: 350px;
-  height: 350px;
-  bottom: -80px;
-  left: -60px;
-  background: radial-gradient(circle, rgba(196, 181, 253, 0.25) 0%, transparent 70%);
-}
-
-.brand-circle-3 {
-  width: 200px;
-  height: 200px;
-  top: 50%;
-  right: 10%;
-  background: radial-gradient(circle, rgba(147, 197, 253, 0.2) 0%, transparent 70%);
-}
-
-.form-side {
-  width: 480px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--cd-bg-page);
-  padding: 40px;
+.dot-blue {
+  right: 30px;
+  top: 94px;
+  border: 9px solid var(--cd-accent-sky);
 }
 
 .form-card {
+  display: flex;
+  justify-content: center;
+  flex-direction: column;
   width: 100%;
-  max-width: 360px;
+  padding: 54px 48px;
+  background: rgba(255, 255, 255, 0.88);
+  border-left: 1px solid var(--cd-border);
 }
 
 .form-title {
@@ -299,18 +331,17 @@ const handleRegister = async () => {
   width: 100%;
   height: 46px;
   border: none;
-  border-radius: var(--cd-radius-md);
-  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
+  border-radius: 999px;
+  background: #202331;
   color: #ffffff;
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity var(--cd-transition), transform var(--cd-transition);
-  letter-spacing: 2px;
+  transition: background var(--cd-transition), transform var(--cd-transition);
 }
 
 .submit-btn:hover {
-  opacity: 0.9;
+  background: #111827;
   transform: translateY(-1px);
 }
 
@@ -339,27 +370,27 @@ const handleRegister = async () => {
 
 @media (max-width: 900px) {
   .auth-page {
-    flex-direction: column;
+    padding: 20px;
   }
 
-  .brand-side {
-    min-height: 200px;
-    padding: 40px 30px;
+  .auth-shell {
+    grid-template-columns: 1fr;
+    min-height: auto;
   }
 
-  .brand-title {
-    font-size: 24px;
+  .brand-panel {
+    min-height: 280px;
+    padding: 28px;
   }
 
-  .brand-desc,
-  .brand-features {
-    display: none;
+  .brand-copy h1 {
+    font-size: 26px;
   }
 
-  .form-side {
-    width: 100%;
-    flex: 1;
-    padding: 30px 20px;
+  .form-card {
+    padding: 32px 24px;
+    border-left: none;
+    border-top: 1px solid var(--cd-border);
   }
 }
 </style>

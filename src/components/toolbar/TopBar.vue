@@ -1,5 +1,15 @@
 <script setup lang="ts">
-import { Download, Share } from '@element-plus/icons-vue'
+import {
+  ArrowLeft,
+  Clock,
+  Delete,
+  Download,
+  Files,
+  MoreFilled,
+  Share,
+  SwitchButton,
+  Warning,
+} from '@element-plus/icons-vue'
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
@@ -71,7 +81,10 @@ const handleMoreCommand = (command: string) => {
 <template>
   <header class="top-bar">
     <div class="left">
-      <button class="logo" @click="goHome" title="返回首页">CD</button>
+      <button class="brand-link" @click="goHome" title="返回首页" aria-label="返回首页">
+        <span class="logo" aria-hidden="true"></span>
+        <span class="brand-name">画协</span>
+      </button>
       <div class="divider"></div>
       <div class="session-name" @dblclick="editing = true">
         <el-input
@@ -107,7 +120,8 @@ const handleMoreCommand = (command: string) => {
 
     <div class="right">
       <button class="back-btn" @click="$emit('back')">
-        &#8592; 返回列表
+        <el-icon><ArrowLeft /></el-icon>
+        返回列表
       </button>
 
       <div class="divider"></div>
@@ -123,28 +137,28 @@ const handleMoreCommand = (command: string) => {
 
       <el-dropdown trigger="click" @command="handleMoreCommand">
         <button class="icon-btn more-btn" title="更多操作">
-          <span class="more-dots">&#8943;</span>
+          <el-icon><MoreFilled /></el-icon>
         </button>
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item command="history">
-              <span class="menu-icon">&#128337;</span> 操作历史
+              <el-icon class="menu-icon"><Clock /></el-icon> 操作历史
             </el-dropdown-item>
             <el-dropdown-item command="conflicts">
-              <span class="menu-icon">&#9888;</span> 冲突日志
+              <el-icon class="menu-icon"><Warning /></el-icon> 冲突日志
             </el-dropdown-item>
             <el-dropdown-item command="versions">
-              <span class="menu-icon">&#128196;</span> 版本快照
+              <el-icon class="menu-icon"><Files /></el-icon> 版本快照
             </el-dropdown-item>
             <el-dropdown-item command="shortcuts" divided>
-              <span class="menu-icon">&#9000;</span> 快捷键
+              <span class="menu-icon keyboard-icon">K</span> 快捷键
             </el-dropdown-item>
             <el-dropdown-item v-if="isCreator" command="deleteSession" divided>
-              <span class="menu-icon danger">&#128465;</span>
+              <el-icon class="menu-icon danger"><Delete /></el-icon>
               <span class="danger">删除会话</span>
             </el-dropdown-item>
             <el-dropdown-item v-else command="leave" divided>
-              <span class="menu-icon danger">&#9211;</span>
+              <el-icon class="menu-icon danger"><SwitchButton /></el-icon>
               <span class="danger">退出会话</span>
             </el-dropdown-item>
           </el-dropdown-menu>
@@ -165,7 +179,7 @@ const handleMoreCommand = (command: string) => {
   gap: 12px;
   padding: 0 16px;
   background: var(--cd-bg-card);
-  box-shadow: var(--cd-shadow-sm);
+  border-bottom: 1px solid var(--cd-border);
   position: relative;
   z-index: 5;
 }
@@ -188,21 +202,38 @@ const handleMoreCommand = (command: string) => {
   margin: 0 4px;
 }
 
-.logo {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+.brand-link {
+  height: 38px;
   border: none;
-  background: linear-gradient(135deg, var(--cd-primary) 0%, #7b93fa 100%);
-  color: #fff;
-  font-weight: 700;
-  font-size: 12px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  color: var(--cd-text-primary);
+  font-weight: 800;
+  font-size: 15px;
   cursor: pointer;
+}
+
+.logo {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  display: block;
+  background-image: url('/logo.png');
+  background-repeat: no-repeat;
+  background-size: contain;
+  background-position: center;
   transition: transform var(--cd-transition);
 }
 
-.logo:hover {
+.brand-link:hover .logo {
   transform: scale(1.05);
+}
+
+.brand-name {
+  line-height: 1;
 }
 
 .session-name {
@@ -219,6 +250,10 @@ const handleMoreCommand = (command: string) => {
 .avatars {
   display: flex;
   align-items: center;
+  padding: 4px 10px;
+  border: 1px solid var(--cd-border);
+  border-radius: 999px;
+  background: #f8f9fc;
 }
 
 .avatars .el-avatar {
@@ -263,9 +298,9 @@ const handleMoreCommand = (command: string) => {
 .icon-btn {
   width: 34px;
   height: 34px;
-  border: none;
-  border-radius: var(--cd-radius-sm);
-  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: #f8f9fc;
   color: var(--cd-text-secondary);
   cursor: pointer;
   display: flex;
@@ -276,19 +311,26 @@ const handleMoreCommand = (command: string) => {
 }
 
 .icon-btn:hover {
+  border-color: rgba(37, 99, 235, 0.24);
   background: var(--cd-primary-light);
   color: var(--cd-primary);
-}
-
-.more-btn .more-dots {
-  font-size: 20px;
-  line-height: 1;
-  letter-spacing: -1px;
 }
 
 .menu-icon {
   margin-right: 6px;
   font-size: 14px;
+}
+
+.keyboard-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .danger {
@@ -309,10 +351,13 @@ const handleMoreCommand = (command: string) => {
 }
 
 .back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--cd-border);
-  border-radius: var(--cd-radius-sm);
+  border-radius: 999px;
   background: var(--cd-bg-card);
-  padding: 6px 12px;
+  padding: 6px 12px 6px 10px;
   font-size: 13px;
   color: var(--cd-text-secondary);
   cursor: pointer;

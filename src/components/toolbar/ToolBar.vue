@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Delete, EditPen, Minus, Pointer, RefreshLeft, RefreshRight, SemiSelect, Top, Bottom } from '@element-plus/icons-vue'
+import { Delete, EditPen, Minus, Pointer, RefreshLeft, RefreshRight, SemiSelect, Top, Bottom, Aim } from '@element-plus/icons-vue'
 import ColorPicker from './ColorPicker.vue'
 
 export type CanvasTool = 'select' | 'line' | 'arrow' | 'rect' | 'circle' | 'text' | 'brush'
@@ -53,25 +53,25 @@ const setTool = (tool: CanvasTool) => {
         <el-icon><Pointer /></el-icon>
       </button>
       <button class="tool-btn" :class="{ active: panMode }" @click="$emit('update:panMode', !panMode)" title="平移 (H)">
-        &#9995;
+        <el-icon><Aim /></el-icon>
       </button>
       <button class="tool-btn" :class="{ active: activeTool === 'line' }" @click="setTool('line')" title="直线 (L)">
         <el-icon><Minus /></el-icon>
       </button>
       <button class="tool-btn" :class="{ active: activeTool === 'arrow' }" @click="setTool('arrow')" title="箭头">
-        &#10132;
+        <span class="arrow-icon"></span>
       </button>
       <button class="tool-btn" :class="{ active: activeTool === 'rect' }" @click="setTool('rect')" title="矩形 (R)">
         <el-icon><SemiSelect /></el-icon>
       </button>
       <button class="tool-btn" :class="{ active: activeTool === 'circle' }" @click="setTool('circle')" title="圆形 (O)">
-        &#9711;
+        <span class="circle-icon"></span>
       </button>
       <button class="tool-btn" :class="{ active: activeTool === 'text' }" @click="setTool('text')" title="文本 (T)">
         <el-icon><EditPen /></el-icon>
       </button>
       <button class="tool-btn" :class="{ active: activeTool === 'brush' }" @click="setTool('brush')" title="画笔 (B)">
-        &#9998;
+        <span class="brush-icon"></span>
       </button>
     </div>
 
@@ -136,11 +136,12 @@ const setTool = (tool: CanvasTool) => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px 10px;
+  padding: 10px;
   margin: 10px 0 10px 10px;
-  background: var(--cd-bg-card);
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(226, 230, 239, 0.92);
   border-radius: var(--cd-radius-lg);
-  box-shadow: var(--cd-shadow-md);
+  box-shadow: var(--cd-shadow-card);
   overflow-y: auto;
   max-height: calc(100vh - 52px - 30px - 40px);
 }
@@ -161,11 +162,11 @@ const setTool = (tool: CanvasTool) => {
 }
 
 .tool-btn {
-  width: 44px;
-  height: 44px;
-  border-radius: var(--cd-radius-md);
-  border: none;
-  background: transparent;
+  width: 54px;
+  height: 40px;
+  border-radius: 11px;
+  border: 1px solid transparent;
+  background: #f8f9fc;
   color: var(--cd-text-secondary);
   cursor: pointer;
   display: flex;
@@ -177,14 +178,16 @@ const setTool = (tool: CanvasTool) => {
 }
 
 .tool-btn:hover {
+  border-color: rgba(37, 99, 235, 0.2);
   background: var(--cd-primary-light);
   color: var(--cd-primary);
 }
 
 .tool-btn.active {
-  background: var(--cd-primary);
+  background: #202331;
+  border-color: #202331;
   color: #ffffff;
-  box-shadow: 0 2px 8px rgba(79, 110, 247, 0.3);
+  box-shadow: 0 12px 22px rgba(20, 30, 55, 0.14);
 }
 
 .tool-btn.danger:disabled {
@@ -209,7 +212,6 @@ const setTool = (tool: CanvasTool) => {
   color: var(--cd-text-muted);
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .width-row {
@@ -237,9 +239,9 @@ const setTool = (tool: CanvasTool) => {
 }
 
 .width-chip.active {
-  border-color: var(--cd-primary);
-  color: var(--cd-primary);
-  background: var(--cd-primary-light);
+  border-color: #202331;
+  color: #ffffff;
+  background: #202331;
   font-weight: 600;
 }
 
@@ -250,11 +252,11 @@ const setTool = (tool: CanvasTool) => {
 }
 
 .action-btn {
-  width: 32px;
+  width: 36px;
   height: 32px;
   border: 1px solid var(--cd-border);
-  border-radius: var(--cd-radius-sm);
-  background: var(--cd-bg-card);
+  border-radius: 10px;
+  background: #ffffff;
   color: var(--cd-text-secondary);
   cursor: pointer;
   display: flex;
@@ -286,7 +288,68 @@ const setTool = (tool: CanvasTool) => {
   text-align: center;
   font-size: 13px;
   font-weight: 600;
-  color: var(--cd-text-muted);
-  padding: 4px 0;
+  color: var(--cd-text-secondary);
+  padding: 8px 0 4px;
+  border-top: 1px solid var(--cd-border);
+}
+
+.arrow-icon,
+.circle-icon,
+.brush-icon {
+  display: block;
+  position: relative;
+}
+
+.arrow-icon {
+  width: 20px;
+  height: 2px;
+  background: currentColor;
+  transform: rotate(-26deg);
+}
+
+.arrow-icon::after {
+  content: '';
+  position: absolute;
+  right: -1px;
+  top: -4px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid currentColor;
+  border-top: 2px solid currentColor;
+  transform: rotate(45deg);
+}
+
+.circle-icon {
+  width: 17px;
+  height: 17px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+
+.brush-icon {
+  width: 20px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: rotate(-32deg);
+}
+
+.brush-icon::before,
+.brush-icon::after {
+  content: '';
+  position: absolute;
+  left: -2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.brush-icon::before {
+  top: -6px;
+}
+
+.brush-icon::after {
+  top: 6px;
 }
 </style>
