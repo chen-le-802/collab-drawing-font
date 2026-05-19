@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Delete, EditPen, Minus, Pointer, RefreshLeft, RefreshRight, Top, Bottom, Rank, Lock, Unlock, Picture, Loading } from '@element-plus/icons-vue'
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ColorPicker from './ColorPicker.vue'
 
 export type CanvasTool = 'select' | 'line' | 'arrow' | 'rect' | 'circle' | 'ellipse' | 'shape' | 'text' | 'brush'
@@ -23,6 +23,7 @@ const props = withDefaults(
     canSendBackward?: boolean
     canToggleLock?: boolean
     selectedLocked?: boolean
+    selectedLockState?: 'none' | 'all' | 'mixed'
     canEditLineStyle?: boolean
     panMode?: boolean
     readOnly?: boolean
@@ -35,6 +36,7 @@ const props = withDefaults(
     canSendBackward: false,
     canToggleLock: false,
     selectedLocked: false,
+    selectedLockState: 'none',
     canEditLineStyle: true,
     panMode: false,
     readOnly: false,
@@ -65,6 +67,12 @@ const lineStyleOptions: Array<{ value: GraphicLineStyle; label: string }> = [
   { value: 'solid', label: '实线' },
   { value: 'dashed', label: '虚线' },
 ]
+const lockButtonTitle = computed(() => {
+  if (props.selectedLockState === 'mixed') {
+    return '部分锁定，点击将全部锁定 (Ctrl/Cmd + L)'
+  }
+  return props.selectedLocked ? '解锁对象 (Ctrl/Cmd + L)' : '锁定对象 (Ctrl/Cmd + L)'
+})
 const shapePickerVisible = ref(false)
 const shapeToolWrapRef = ref<HTMLElement | null>(null)
 const shapeTriggerRef = ref<HTMLElement | null>(null)
@@ -301,10 +309,10 @@ onBeforeUnmount(() => {
       <button
         class="action-btn"
         :disabled="readOnly || !canToggleLock"
-        :title="selectedLocked ? '解锁对象 (Ctrl/Cmd + L)' : '锁定对象 (Ctrl/Cmd + L)'"
+        :title="lockButtonTitle"
         @click="$emit('toggleLock')"
       >
-        <el-icon><Lock v-if="!selectedLocked" /><Unlock v-else /></el-icon>
+        <el-icon><Lock v-if="selectedLockState !== 'all'" /><Unlock v-else /></el-icon>
       </button>
       <button class="action-btn" :disabled="readOnly || !canBringForward" @click="$emit('bringForward')" title="上移一层">
         <el-icon><Top /></el-icon>

@@ -1,7 +1,8 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import type { CollaborationConflictType, SessionOperationItemVO, SessionOperationType } from '@/types/session'
 
-defineProps<{
+const props = defineProps<{
   visible: boolean
   loading: boolean
   list: SessionOperationItemVO[]
@@ -22,6 +23,7 @@ defineProps<{
   formatTimelineActivityText: (item: SessionOperationItemVO) => string
   formatTimelineConflictHint: (item: SessionOperationItemVO) => string
   formatFieldNamesText: (fields: string[]) => string
+  formatFieldNameLabel: (value: string) => string
   getResolvedFieldList: (item: SessionOperationItemVO, key: 'appliedFields' | 'rejectedFields') => string[]
   formatResolveReasonLabel: (value: unknown) => string
 }>()
@@ -50,6 +52,171 @@ const isRestoreEvent = (item: SessionOperationItemVO): boolean => {
 
 const formatRowTime = (timestamp: number): string => {
   return new Date(timestamp).toLocaleString('zh-CN', { hour12: false })
+}
+
+type TimelineRow = {
+  kind: 'single' | 'group'
+  key: string
+  anchor: SessionOperationItemVO
+  items: SessionOperationItemVO[]
+  fieldKeys: string[]
+}
+
+const expandedGroupKeys = ref<string[]>([])
+
+const isRecord = (value: unknown): value is Record<string, unknown> => {
+  return typeof value === 'object' && value !== null
+}
+
+const getOperationFieldKeys = (item: SessionOperationItemVO): string[] => {
+  const payload = isRecord(item.operationData) ? item.operationData : {}
+  const ignore = new Set([
+    'objectKey',
+    'operationId',
+    'baseVersion',
+    'clientId',
+    'lamportTime',
+    '__systemEvent',
+    'targetVersion',
+    'previousVersion',
+    'restoredVersion',
+    'createdCount',
+    'updatedCount',
+    'deletedCount',
+  ])
+  return Object.keys(payload).filter((key) => !ignore.has(key))
+}
+
+const getFieldSignature = (item: SessionOperationItemVO): string => {
+  return getOperationFieldKeys(item).sort().join('|')
+}
+
+const canGroup = (item: SessionOperationItemVO): boolean => {
+  if (isRestoreEvent(item)) {
+    return false
+  }
+  return item.operationType === 'update'
+}
+
+const resolveBatchGroupKey = (item: SessionOperationItemVO): string | null => {
+  if (typeof item.batchId === 'string' && item.batchId.trim().length > 0) {
+    return item.batchId.trim()
+  }
+  return null
+}
+
+const timelineRows = computed<TimelineRow[]>(() => {
+  const rows: TimelineRow[] = []
+  const list = props.list
+  const consumedBatchIds = new Set<string>()
+  for (let i = 0; i < list.length; i += 1) {
+    const current = list[i]
+    if (!current) {
+      continue
+    }
+    const backendBatchId = resolveBatchGroupKey(current)
+    if (backendBatchId && !isRestoreEvent(current)) {
+      if (consumedBatchIds.has(backendBatchId)) {
+        continue
+      }
+      consumedBatchIds.add(backendBatchId)
+      const batchItems = list.filter((item) => resolveBatchGroupKey(item) === backendBatchId)
+      const unique = new Map<number, SessionOperationItemVO>()
+      batchItems.forEach((item) => {
+        unique.set(item.id, item)
+      })
+      const grouped = Array.from(unique.values()).sort((a, b) => b.timestamp - a.timestamp)
+      if (grouped.length <= 1) {
+        rows.push({
+          kind: 'single',
+          key: `single_${current.id}`,
+          anchor: current,
+          items: [current],
+          fieldKeys: getOperationFieldKeys(current),
+        })
+      } else {
+        rows.push({
+          kind: 'group',
+          key: `group_batch_${backendBatchId}`,
+          anchor: grouped[0] ?? current,
+          items: grouped,
+          fieldKeys: Array.from(new Set(grouped.flatMap((item) => getOperationFieldKeys(item)))),
+        })
+      }
+      continue
+    }
+
+    if (!canGroup(current)) {
+      rows.push({
+        kind: 'single',
+        key: `single_${current.id}`,
+        anchor: current,
+        items: [current],
+        fieldKeys: getOperationFieldKeys(current),
+      })
+      continue
+    }
+
+    const currentSignature = getFieldSignature(current)
+    const group: SessionOperationItemVO[] = [current]
+    let cursor = i + 1
+    while (cursor < list.length) {
+      const next = list[cursor]
+      if (!next || !canGroup(next)) {
+        break
+      }
+      if (next.userId !== current.userId || next.operationType !== current.operationType || next.conflictType !== current.conflictType) {
+        break
+      }
+      if (getFieldSignature(next) !== currentSignature) {
+        break
+      }
+      if (Math.abs(next.timestamp - current.timestamp) > 2000) {
+        break
+      }
+      group.push(next)
+      cursor += 1
+    }
+
+    if (group.length <= 1) {
+      rows.push({
+        kind: 'single',
+        key: `single_${current.id}`,
+        anchor: current,
+        items: [current],
+        fieldKeys: getOperationFieldKeys(current),
+      })
+      continue
+    }
+
+    rows.push({
+      kind: 'group',
+      key: `group_${group.map((item) => item.id).join('_')}`,
+      anchor: current,
+      items: group,
+      fieldKeys: getOperationFieldKeys(current),
+    })
+    i = cursor - 1
+  }
+  return rows
+})
+
+const toggleGroup = (key: string) => {
+  if (expandedGroupKeys.value.includes(key)) {
+    expandedGroupKeys.value = expandedGroupKeys.value.filter((item) => item !== key)
+    return
+  }
+  expandedGroupKeys.value = [...expandedGroupKeys.value, key]
+}
+
+const isGroupExpanded = (key: string) => expandedGroupKeys.value.includes(key)
+
+const formatBatchTitle = (row: TimelineRow): string => {
+  const label = row.anchor.batchLabel
+  if (typeof label === 'string' && label.trim().length > 0) {
+    return label.trim()
+  }
+  return '批量更新'
 }
 </script>
 
@@ -120,43 +287,108 @@ const formatRowTime = (timestamp: number): string => {
     <div v-if="loading" class="history-empty">加载中...</div>
     <div v-else-if="list.length === 0" class="history-empty">暂无操作记录</div>
     <div v-else class="history-list">
-      <div v-for="item in list" :key="item.id" class="history-row">
-        <div class="history-main">
-          <span class="history-type">{{ isRestoreEvent(item) ? '恢复快照' : formatSessionOperationTypeLabel(item.operationType) }}</span>
-          <span class="history-user">{{ formatOperationActorLabel(item.userId) }}</span>
-          <span class="history-time">{{ formatRowTime(item.timestamp) }}</span>
-          <span class="history-conflict">{{ isRestoreEvent(item) ? '-' : formatConflictTypeLabel(item.conflictType) }}</span>
-          <el-button
-            link
-            type="primary"
-            size="small"
-            :disabled="isRestoreEvent(item) || !canLocateObject(item.objectKey)"
-            @click="emit('locateObject', item)"
-          >
-            定位到对象
-          </el-button>
-          <el-button link type="info" size="small" :disabled="isRestoreEvent(item)" @click="emit('toggleTechnical', item.id)">
-            {{ isTechnicalExpanded(item.id) ? '收起技术详情' : '技术详情' }}
-          </el-button>
-        </div>
-        <div class="history-activity">{{ formatTimelineActivityText(item) }}</div>
-        <div class="history-detail">{{ formatTimelineConflictHint(item) }}</div>
-        <div v-if="isTechnicalExpanded(item.id)" class="history-tech">
-          <div class="history-meta">
-            <span class="history-object">对象: {{ item.objectKey || '-' }}</span>
-            <span>版本: {{ item.serverVersion }}</span>
-            <span>基线版本: {{ item.baseVersion }}</span>
-            <span>Lamport: {{ item.lamportTime }}</span>
-            <span>Client: {{ item.clientId || '-' }}</span>
-            <span>操作ID: {{ item.operationId || '-' }}</span>
-            <span class="history-time">{{ new Date(item.timestamp).toLocaleString('zh-CN', { hour12: false }) }}</span>
+      <div v-for="row in timelineRows" :key="row.key" class="history-row">
+        <template v-if="row.kind === 'single'">
+          <div class="history-main">
+            <span class="history-type">{{ isRestoreEvent(row.anchor) ? '恢复快照' : formatSessionOperationTypeLabel(row.anchor.operationType) }}</span>
+            <span class="history-user">{{ formatOperationActorLabel(row.anchor.userId) }}</span>
+            <span class="history-time">{{ formatRowTime(row.anchor.timestamp) }}</span>
+            <span class="history-conflict">{{ isRestoreEvent(row.anchor) ? '系统版本操作' : formatConflictTypeLabel(row.anchor.conflictType) }}</span>
+            <el-button
+              link
+              type="primary"
+              size="small"
+              :disabled="isRestoreEvent(row.anchor) || !canLocateObject(row.anchor.objectKey)"
+              @click="emit('locateObject', row.anchor)"
+            >
+              定位到对象
+            </el-button>
+            <el-button link type="info" size="small" :disabled="isRestoreEvent(row.anchor)" @click="emit('toggleTechnical', row.anchor.id)">
+              {{ isTechnicalExpanded(row.anchor.id) ? '收起技术详情' : '技术详情' }}
+            </el-button>
           </div>
-          <div class="history-tech-fields">
-            <span>采用字段: {{ formatFieldNamesText(getResolvedFieldList(item, 'appliedFields')) }}</span>
-            <span>拒绝字段: {{ formatFieldNamesText(getResolvedFieldList(item, 'rejectedFields')) }}</span>
-            <span>解决原因: {{ formatResolveReasonLabel(typeof item.resolvedResult === 'object' && item.resolvedResult ? item.resolvedResult.resolveReason : undefined) }}</span>
+          <div class="history-activity">{{ formatTimelineActivityText(row.anchor) }}</div>
+          <div class="history-detail">{{ formatTimelineConflictHint(row.anchor) }}</div>
+          <div v-if="isTechnicalExpanded(row.anchor.id)" class="history-tech">
+            <div class="history-meta">
+              <span class="history-object">对象: {{ row.anchor.objectKey || '-' }}</span>
+              <span>版本: {{ row.anchor.serverVersion }}</span>
+              <span>基线版本: {{ row.anchor.baseVersion }}</span>
+              <span>Lamport: {{ row.anchor.lamportTime }}</span>
+              <span>Client: {{ row.anchor.clientId || '-' }}</span>
+              <span>操作ID: {{ row.anchor.operationId || '-' }}</span>
+              <span class="history-time">{{ new Date(row.anchor.timestamp).toLocaleString('zh-CN', { hour12: false }) }}</span>
+            </div>
+            <div class="history-tech-fields">
+              <span>采用字段: {{ formatFieldNamesText(getResolvedFieldList(row.anchor, 'appliedFields')) }}</span>
+              <span>拒绝字段: {{ formatFieldNamesText(getResolvedFieldList(row.anchor, 'rejectedFields')) }}</span>
+              <span>解决原因: {{ formatResolveReasonLabel(typeof row.anchor.resolvedResult === 'object' && row.anchor.resolvedResult ? row.anchor.resolvedResult.resolveReason : undefined) }}</span>
+            </div>
           </div>
-        </div>
+        </template>
+        <template v-else>
+          <div class="history-main">
+            <span class="history-type">{{ formatBatchTitle(row) }}</span>
+            <span class="history-user">{{ formatOperationActorLabel(row.anchor.userId) }}</span>
+            <span class="history-time">{{ formatRowTime(row.anchor.timestamp) }}</span>
+            <span class="history-conflict">{{ formatConflictTypeLabel(row.anchor.conflictType) }}</span>
+            <el-button link type="info" size="small" @click="emit('toggleTechnical', row.anchor.id)">
+              {{ isTechnicalExpanded(row.anchor.id) ? '收起技术详情' : '技术详情' }}
+            </el-button>
+            <el-button link type="info" size="small" @click="toggleGroup(row.key)">
+              {{ isGroupExpanded(row.key) ? '收起批量明细' : '展开批量明细' }}
+            </el-button>
+          </div>
+          <div class="history-activity">
+            {{ formatOperationActorLabel(row.anchor.userId) }} 批量更新了 {{ row.items.length }} 个图元
+            <template v-if="row.fieldKeys.length > 0">
+              ，字段：{{ row.fieldKeys.map((field) => formatFieldNameLabel(field)).join('、') }}
+            </template>
+          </div>
+          <div class="history-detail">该批量操作已聚合展示，可展开查看每个图元的明细。</div>
+          <div v-if="isTechnicalExpanded(row.anchor.id)" class="history-tech">
+            <div class="history-meta">
+              <span>批次ID: {{ row.anchor.batchId || '-' }}</span>
+              <span>批次数量: {{ row.anchor.batchSize ?? row.items.length }}</span>
+              <span>版本区间: {{ row.items[row.items.length - 1]?.serverVersion ?? row.anchor.serverVersion }} - {{ row.anchor.serverVersion }}</span>
+              <span>Client: {{ row.anchor.clientId || '-' }}</span>
+              <span>Lamport: {{ row.anchor.lamportTime }}</span>
+              <span class="history-time">{{ new Date(row.anchor.timestamp).toLocaleString('zh-CN', { hour12: false }) }}</span>
+            </div>
+            <div class="history-tech-fields">
+              <span>批量字段: {{ row.fieldKeys.length > 0 ? row.fieldKeys.map((field) => formatFieldNameLabel(field)).join('、') : '-' }}</span>
+            </div>
+          </div>
+          <div v-if="isGroupExpanded(row.key)" class="history-tech">
+            <div class="history-tech-fields">
+              <div v-for="detail in row.items" :key="detail.id" class="history-group-item">
+                <div class="history-main">
+                  <span class="history-object">{{ detail.objectKey }}</span>
+                  <span class="history-time">{{ formatRowTime(detail.timestamp) }}</span>
+                  <el-button
+                    link
+                    type="primary"
+                    size="small"
+                    :disabled="!canLocateObject(detail.objectKey)"
+                    @click="emit('locateObject', detail)"
+                  >
+                    定位
+                  </el-button>
+                  <el-button link type="info" size="small" @click="emit('toggleTechnical', detail.id)">
+                    {{ isTechnicalExpanded(detail.id) ? '收起技术详情' : '技术详情' }}
+                  </el-button>
+                </div>
+                <div class="history-activity">{{ formatTimelineActivityText(detail) }}</div>
+                <div class="history-detail">{{ formatTimelineConflictHint(detail) }}</div>
+                <div v-if="isTechnicalExpanded(detail.id)" class="history-tech-fields">
+                  <span>采用字段: {{ formatFieldNamesText(getResolvedFieldList(detail, 'appliedFields')) }}</span>
+                  <span>拒绝字段: {{ formatFieldNamesText(getResolvedFieldList(detail, 'rejectedFields')) }}</span>
+                  <span>解决原因: {{ formatResolveReasonLabel(typeof detail.resolvedResult === 'object' && detail.resolvedResult ? detail.resolvedResult.resolveReason : undefined) }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
     <div class="timeline-pagination">

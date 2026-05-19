@@ -40,6 +40,9 @@ const close = () => {
         创建快照
       </el-button>
     </div>
+    <div class="history-empty" style="padding-top: 0">
+      提示：恢复到某个快照时，会按目标版本状态覆盖当前画布内容，并生成一条新的恢复操作记录（历史版本本身不会被删除）。
+    </div>
     <div v-if="list.length === 0" class="history-empty">暂无版本快照</div>
     <div v-else class="version-list">
       <div v-for="item in list" :key="item.id" class="version-row">

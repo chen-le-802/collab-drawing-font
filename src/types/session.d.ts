@@ -123,6 +123,10 @@ export interface SessionOperationItemVO {
   serverVersion: number
   lamportTime: number
   clientId?: string
+  batchId?: string
+  batchIndex?: number
+  batchSize?: number
+  batchLabel?: string
   resolvedResult?: Record<string, unknown>
   conflictType: CollaborationConflictType
   timestamp: number
