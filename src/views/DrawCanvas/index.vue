@@ -10,8 +10,8 @@ import TopBar from '@/components/toolbar/TopBar.vue'
 import ConflictLogDialog from '@/views/DrawCanvas/components/ConflictLogDialog.vue'
 import InviteDialog from '@/views/DrawCanvas/components/InviteDialog.vue'
 import MemberManageDialog from '@/views/DrawCanvas/components/MemberManageDialog.vue'
-import OnboardingGuide, { type GuideStep } from '@/views/DrawCanvas/components/OnboardingGuide.vue'
 import OperationTimelineDialog from '@/views/DrawCanvas/components/OperationTimelineDialog.vue'
+import ShortcutHelpDialog, { type GuideStep } from '@/views/DrawCanvas/components/ShortcutHelpDialog.vue'
 import VersionHistoryDialog from '@/views/DrawCanvas/components/VersionHistoryDialog.vue'
 import { graphicApi } from '@/api/graphic'
 import { sessionApi } from '@/api/session'
@@ -71,13 +71,43 @@ interface DragMove {
   originalGraphic: GraphicVO | null
 }
 
-type ResizeHandleKey = 'nw' | 'ne' | 'sw' | 'se'
+interface MultiDragState {
+  active: boolean
+  objectKeys: string[]
+  start: Point
+  baseByKey: Record<string, { x: number; y: number; pathPoints: Point[] | null }>
+}
+
+type ResizeHandleKey = 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se'
 
 interface ResizeState {
   active: boolean
   objectKey: string
   handle: ResizeHandleKey | null
   originalGraphic: GraphicVO | null
+}
+
+interface RotateState {
+  active: boolean
+  objectKey: string
+  center: Point
+  startAngle: number
+  originalRotation: number
+  originalGraphic: GraphicVO | null
+}
+
+interface GroupResizeState {
+  active: boolean
+  handle: ResizeHandleKey | null
+  originalBounds: { x: number; y: number; width: number; height: number } | null
+  originalGraphics: Record<string, GraphicVO>
+}
+
+interface GroupRotateState {
+  active: boolean
+  center: Point
+  startAngle: number
+  originalGraphics: Record<string, GraphicVO>
 }
 
 interface PanState {
@@ -113,6 +143,7 @@ const canvasStore = useCanvasStore()
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const canvasContainerRef = ref<HTMLDivElement | null>(null)
+const drawPageRef = ref<HTMLDivElement | null>(null)
 
 const joining = ref(false)
 const joined = ref(false)
@@ -144,6 +175,7 @@ const viewportOffset = ref<Point>({ x: 0, y: 0 })
 const panMode = ref(false)
 const zoomOptions = [50, 75, 100, 125, 150, 200]
 const selectedObjectKey = ref<string | null>(null)
+const selectedObjectKeys = ref<string[]>([])
 const textEditing = ref(false)
 const textEditorValue = ref('')
 const textEditorPoint = ref<Point>({ x: 0, y: 0 })
@@ -173,8 +205,10 @@ const shareQrcodePendingLink = ref('')
 const shareQrcodeVisible = ref(false)
 const exportDialogVisible = ref(false)
 const exportFormat = ref<'png' | 'svg' | 'pdf'>('png')
+const exportIncludeGrid = ref(true)
 const showGrid = ref(true)
 const focusMode = ref(false)
+const technicalMode = ref(false)
 const onboardingVisible = ref(false)
 const onboardingSteps = ref<GuideStep[]>([
   { selector: '[data-guide="topbar"]', title: '顶部工具区', content: '在这里可以分享会话、导出画布、查看版本与冲突。', placement: 'bottom' },
@@ -202,6 +236,8 @@ const clientVersionRef = ref(0)
 const recentConflictTimestamps = ref<number[]>([])
 const conflictFocusMap = ref<Record<string, { fields: string[]; updatedAt: number }>>({})
 const focusedObjectKey = ref<string | null>(null)
+const clipboardGraphics = ref<GraphicVO[]>([])
+const pasteCount = ref(0)
 const textEditorWidth = computed(() => {
   const content = textEditorValue.value || '输入文本，回车确认'
   const estimated = content.length * 14 + 28
@@ -224,12 +260,38 @@ const dragMove = ref<DragMove>({
   basePathPoints: null,
   originalGraphic: null,
 })
+const multiDrag = ref<MultiDragState>({
+  active: false,
+  objectKeys: [],
+  start: { x: 0, y: 0 },
+  baseByKey: {},
+})
 
 const resizeState = ref<ResizeState>({
   active: false,
   objectKey: '',
   handle: null,
   originalGraphic: null,
+})
+const rotateState = ref<RotateState>({
+  active: false,
+  objectKey: '',
+  center: { x: 0, y: 0 },
+  startAngle: 0,
+  originalRotation: 0,
+  originalGraphic: null,
+})
+const groupResizeState = ref<GroupResizeState>({
+  active: false,
+  handle: null,
+  originalBounds: null,
+  originalGraphics: {},
+})
+const groupRotateState = ref<GroupRotateState>({
+  active: false,
+  center: { x: 0, y: 0 },
+  startAngle: 0,
+  originalGraphics: {},
 })
 const panState = ref<PanState>({
   active: false,
@@ -249,10 +311,43 @@ const zoomScale = computed(() => zoomPercent.value / 100)
 const currentVersion = computed(() => sessionDetail.value?.currentVersion ?? sessionInfo.value?.currentVersion ?? 0)
 const currentSessionName = computed(() => sessionDetail.value?.name ?? sessionInfo.value?.name ?? '未命名会话')
 const sortedGraphics = computed(() => [...canvasStore.graphics].sort((a, b) => a.zIndex - b.zIndex))
+const selectedGraphics = computed(() => {
+  const keySet = new Set(selectedObjectKeys.value)
+  if (keySet.size === 0 && selectedObjectKey.value) {
+    keySet.add(selectedObjectKey.value)
+  }
+  if (keySet.size === 0) {
+    return [] as GraphicVO[]
+  }
+  return canvasStore.graphics.filter((item) => keySet.has(item.objectKey))
+})
 const selectedGraphic = computed(() =>
   selectedObjectKey.value ? canvasStore.graphics.find((item) => item.objectKey === selectedObjectKey.value) ?? null : null,
 )
-const canDeleteSelected = computed(() => !!selectedGraphic.value)
+const canDeleteSelected = computed(() => selectedGraphics.value.length > 0)
+const selectedLocked = computed(() => {
+  if (selectedGraphics.value.length === 0) {
+    return false
+  }
+  return selectedGraphics.value.every((item) => item.isLocked)
+})
+const canToggleLock = computed(() => selectedGraphics.value.length > 0)
+const selectedGraphicsBounds = computed(() => {
+  if (selectedGraphics.value.length === 0) {
+    return null as { x: number; y: number; width: number; height: number } | null
+  }
+  const boundsList = selectedGraphics.value.map((item) => getGraphicBounds(item))
+  const left = Math.min(...boundsList.map((item) => item.x))
+  const top = Math.min(...boundsList.map((item) => item.y))
+  const right = Math.max(...boundsList.map((item) => item.x + item.width))
+  const bottom = Math.max(...boundsList.map((item) => item.y + item.height))
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  }
+})
 const canvasCursor = computed(() => {
   if (panState.value.active) {
     return 'grabbing'
@@ -263,6 +358,9 @@ const canvasCursor = computed(() => {
   return activeTool.value === 'select' ? 'default' : 'crosshair'
 })
 const canBringForward = computed(() => {
+  if (selectedGraphics.value.length !== 1) {
+    return false
+  }
   const selected = selectedGraphic.value
   if (!selected) {
     return false
@@ -270,6 +368,9 @@ const canBringForward = computed(() => {
   return canvasStore.graphics.some((item) => item.zIndex > selected.zIndex)
 })
 const canSendBackward = computed(() => {
+  if (selectedGraphics.value.length !== 1) {
+    return false
+  }
   const selected = selectedGraphic.value
   if (!selected) {
     return false
@@ -277,19 +378,29 @@ const canSendBackward = computed(() => {
   return canvasStore.graphics.some((item) => item.zIndex < selected.zIndex)
 })
 const canEditFillColor = computed(() => {
+  const canFillGraphic = (item: GraphicVO) => {
+    if (item.objectType === 'rect' || item.objectType === 'circle') {
+      return true
+    }
+    if (item.objectType !== 'path') {
+      return false
+    }
+    const points = item.pathPoints ?? []
+    return points.length >= 3 && isClosedPath(points)
+  }
+  if (selectedGraphics.value.length > 1) {
+    return selectedGraphics.value.some(canFillGraphic)
+  }
   const selected = selectedGraphic.value
   if (!selected) {
-    return false
-  }
-  if (selected.objectType === 'rect' || selected.objectType === 'circle') {
     return true
   }
-  if (selected.objectType !== 'path') {
-    return false
-  }
-  return isClosedPath(selected.pathPoints ?? [])
+  return canFillGraphic(selected)
 })
 const canEditLineStyle = computed(() => {
+  if (selectedGraphics.value.length > 1) {
+    return selectedGraphics.value.some((item) => item.objectType !== 'text' && item.objectType !== 'image')
+  }
   const selected = selectedGraphic.value
   if (!selected) {
     return true
@@ -330,6 +441,7 @@ watch(
       return
     }
     selectedObjectKey.value = value
+    selectedObjectKeys.value = value ? [value] : []
     scheduleRender()
   },
 )
@@ -371,12 +483,16 @@ let focusHighlightTimer: number | null = null
 const HEARTBEAT_MS = 20_000
 const RESIZE_HANDLE_HIT_SIZE = 8
 const RESIZE_MIN_SIZE = 12
+const ROTATE_HANDLE_HIT_SIZE = 8
+const ROTATE_HANDLE_OFFSET = 28
 const PATH_CLOSE_DISTANCE = 12
 const TEXT_MIN_FONT_SIZE = 10
 const TEXT_MAX_FONT_SIZE = 120
 const ARROW_HEAD_BASE = 10
 const ARROW_HEAD_MAX = 24
 const imageElementCache = new Map<string, HTMLImageElement>()
+const imageFallbackLoading = new Set<string>()
+const imageObjectUrlBySource = new Map<string, string>()
 
 const getWsUrl = (): string => {
   const baseApi = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000/api/'
@@ -518,9 +634,43 @@ const normalizeRect = (x: number, y: number, width: number, height: number) => {
   }
 }
 
+const rotatePoint = (point: Point, center: Point, angleRad: number): Point => {
+  const cos = Math.cos(angleRad)
+  const sin = Math.sin(angleRad)
+  const dx = point.x - center.x
+  const dy = point.y - center.y
+  return {
+    x: center.x + dx * cos - dy * sin,
+    y: center.y + dx * sin + dy * cos,
+  }
+}
+
+const getRotatedRectBounds = (x: number, y: number, width: number, height: number, rotationDeg: number) => {
+  const rect = normalizeRect(x, y, width, height)
+  if (!rotationDeg) {
+    return rect
+  }
+  const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
+  const angle = (rotationDeg * Math.PI) / 180
+  const corners = [
+    { x: rect.x, y: rect.y },
+    { x: rect.x + rect.width, y: rect.y },
+    { x: rect.x, y: rect.y + rect.height },
+    { x: rect.x + rect.width, y: rect.y + rect.height },
+  ].map((p) => rotatePoint(p, center, angle))
+  const xs = corners.map((p) => p.x)
+  const ys = corners.map((p) => p.y)
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys),
+  }
+}
+
 const getGraphicBounds = (graphic: GraphicVO) => {
   if (graphic.objectType === 'image') {
-    return normalizeRect(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0)
+    return getRotatedRectBounds(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0, graphic.rotation ?? 0)
   }
 
   if (graphic.objectType === 'path') {
@@ -534,12 +684,11 @@ const getGraphicBounds = (graphic: GraphicVO) => {
     const maxX = Math.max(...xs)
     const minY = Math.min(...ys)
     const maxY = Math.max(...ys)
-    const pad = Math.max(6, graphic.strokeWidth + 4)
     return {
-      x: minX - pad,
-      y: minY - pad,
-      width: maxX - minX + pad * 2,
-      height: maxY - minY + pad * 2,
+      x: minX,
+      y: minY,
+      width: Math.max(1, maxX - minX),
+      height: Math.max(1, maxY - minY),
     }
   }
 
@@ -571,10 +720,25 @@ const getGraphicBounds = (graphic: GraphicVO) => {
   if (graphic.objectType === 'text') {
     const width = graphic.width ?? 140
     const height = graphic.height ?? Math.max((graphic.fontSize ?? 16) + 8, 24)
-    return normalizeRect(graphic.positionX, graphic.positionY, width, height)
+    return getRotatedRectBounds(graphic.positionX, graphic.positionY, width, height, graphic.rotation ?? 0)
+  }
+
+  if (graphic.objectType === 'rect') {
+    return getRotatedRectBounds(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0, graphic.rotation ?? 0)
   }
 
   return normalizeRect(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0)
+}
+
+const getGraphicCenter = (graphic: GraphicVO): Point => {
+  if (graphic.objectType === 'circle') {
+    return { x: graphic.positionX, y: graphic.positionY }
+  }
+  const bounds = getGraphicBounds(graphic)
+  return {
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2,
+  }
 }
 
 const pointToSegmentDistance = (p: Point, start: Point, end: Point): number => {
@@ -587,6 +751,27 @@ const pointToSegmentDistance = (p: Point, start: Point, end: Point): number => {
   const projX = start.x + t * dx
   const projY = start.y + t * dy
   return Math.hypot(p.x - projX, p.y - projY)
+}
+
+const pointInPolygon = (point: Point, polygon: Point[]): boolean => {
+  if (polygon.length < 3) {
+    return false
+  }
+  let inside = false
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+    const pi = polygon[i]
+    const pj = polygon[j]
+    if (!pi || !pj) {
+      continue
+    }
+    const intersect =
+      (pi.y > point.y) !== (pj.y > point.y) &&
+      point.x < ((pj.x - pi.x) * (point.y - pi.y)) / ((pj.y - pi.y) || Number.EPSILON) + pi.x
+    if (intersect) {
+      inside = !inside
+    }
+  }
+  return inside
 }
 
 const isClosedPath = (points: Point[]): boolean => {
@@ -723,6 +908,9 @@ const pointInGraphic = (point: Point, graphic: GraphicVO): boolean => {
     if (points.length < 2) {
       return false
     }
+    if (isClosedPath(points) && pointInPolygon(point, points)) {
+      return true
+    }
     const hitDistance = Math.max(6, graphic.strokeWidth + 4)
     for (let i = 1; i < points.length; i += 1) {
       const start = points[i - 1]
@@ -771,6 +959,7 @@ const pickGraphic = (point: Point): GraphicVO | null => {
 }
 
 const drawLine = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
+  ctx.setLineDash(graphic.lineStyle === 'dashed' ? [8, 6] : [])
   ctx.beginPath()
   ctx.moveTo(graphic.positionX, graphic.positionY)
   ctx.lineTo(graphic.positionX + (graphic.width ?? 0), graphic.positionY + (graphic.height ?? 0))
@@ -782,24 +971,36 @@ const drawLine = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
 const drawRect = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   const width = graphic.width ?? 0
   const height = graphic.height ?? 0
+  const rotation = ((graphic.rotation ?? 0) * Math.PI) / 180
+  const center = { x: graphic.positionX + width / 2, y: graphic.positionY + height / 2 }
+  ctx.save()
+  if (rotation) {
+    ctx.translate(center.x, center.y)
+    ctx.rotate(rotation)
+    ctx.translate(-center.x, -center.y)
+  }
   if (graphic.fillColor && graphic.fillColor !== 'transparent') {
     ctx.fillStyle = graphic.fillColor
     ctx.fillRect(graphic.positionX, graphic.positionY, width, height)
   }
+  ctx.setLineDash(graphic.lineStyle === 'dashed' ? [8, 6] : [])
   ctx.strokeStyle = graphic.strokeColor
   ctx.lineWidth = graphic.strokeWidth
   ctx.strokeRect(graphic.positionX, graphic.positionY, width, height)
+  ctx.restore()
 }
 
 const drawCircle = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   const radiusX = Math.abs(graphic.width ?? 0) / 2
   const radiusY = Math.abs(graphic.height ?? 0) / 2
+  const rotation = ((graphic.rotation ?? 0) * Math.PI) / 180
   ctx.beginPath()
-  ctx.ellipse(graphic.positionX, graphic.positionY, radiusX, radiusY, 0, 0, Math.PI * 2)
+  ctx.ellipse(graphic.positionX, graphic.positionY, radiusX, radiusY, rotation, 0, Math.PI * 2)
   if (graphic.fillColor && graphic.fillColor !== 'transparent') {
     ctx.fillStyle = graphic.fillColor
     ctx.fill()
   }
+  ctx.setLineDash(graphic.lineStyle === 'dashed' ? [8, 6] : [])
   ctx.strokeStyle = graphic.strokeColor
   ctx.lineWidth = graphic.strokeWidth
   ctx.stroke()
@@ -807,10 +1008,22 @@ const drawCircle = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
 
 const drawText = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   const fontSize = graphic.fontSize ?? 16
+  const text = graphic.textContent ?? ''
+  const rotation = ((graphic.rotation ?? 0) * Math.PI) / 180
+  const boxWidth = graphic.width ?? Math.max(160, text.length * fontSize * 0.6)
+  const boxHeight = graphic.height ?? Math.max(fontSize + 8, 24)
+  const center = { x: graphic.positionX + boxWidth / 2, y: graphic.positionY + boxHeight / 2 }
+  ctx.save()
+  if (rotation) {
+    ctx.translate(center.x, center.y)
+    ctx.rotate(rotation)
+    ctx.translate(-center.x, -center.y)
+  }
   ctx.fillStyle = graphic.strokeColor
   ctx.font = `${fontSize}px sans-serif`
   ctx.textBaseline = 'top'
-  ctx.fillText(graphic.textContent ?? '', graphic.positionX, graphic.positionY)
+  ctx.fillText(text, graphic.positionX, graphic.positionY)
+  ctx.restore()
 }
 
 const drawPath = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
@@ -838,6 +1051,7 @@ const drawPath = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
       ctx.fill()
     }
   }
+  ctx.setLineDash(graphic.lineStyle === 'dashed' ? [8, 6] : [])
   ctx.strokeStyle = graphic.strokeColor
   ctx.lineWidth = graphic.strokeWidth
   ctx.lineCap = 'round'
@@ -851,19 +1065,35 @@ const drawImageGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => 
   const x = graphic.positionX
   const y = graphic.positionY
   const src = graphic.textContent || ''
+  const rotation = ((graphic.rotation ?? 0) * Math.PI) / 180
+  const center = { x: x + width / 2, y: y + height / 2 }
+  const withRotation = (fn: () => void) => {
+    ctx.save()
+    if (rotation) {
+      ctx.translate(center.x, center.y)
+      ctx.rotate(rotation)
+      ctx.translate(-center.x, -center.y)
+    }
+    fn()
+    ctx.restore()
+  }
   if (!src) {
-    ctx.fillStyle = '#f3f4f6'
-    ctx.fillRect(x, y, width, height)
-    ctx.strokeStyle = '#cbd5e1'
-    ctx.strokeRect(x, y, width, height)
+    withRotation(() => {
+      ctx.fillStyle = '#f3f4f6'
+      ctx.fillRect(x, y, width, height)
+      ctx.strokeStyle = '#cbd5e1'
+      ctx.strokeRect(x, y, width, height)
+    })
     return
   }
 
   const cached = imageElementCache.get(src)
   if (cached && cached.complete && cached.naturalWidth > 0 && cached.naturalHeight > 0) {
-    ctx.drawImage(cached, x, y, width, height)
-    ctx.strokeStyle = '#e5e7eb'
-    ctx.strokeRect(x, y, width, height)
+    withRotation(() => {
+      ctx.drawImage(cached, x, y, width, height)
+      ctx.strokeStyle = '#e5e7eb'
+      ctx.strokeRect(x, y, width, height)
+    })
     return
   }
 
@@ -874,16 +1104,55 @@ const drawImageGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => 
       scheduleRender()
     }
     image.onerror = () => {
-      scheduleRender()
+      imageElementCache.delete(src)
+      if (!imageFallbackLoading.has(src)) {
+        imageFallbackLoading.add(src)
+        fetch(src, {
+          credentials: 'include',
+          headers: (() => {
+            const token = storage.getToken()
+            return token ? { Authorization: `Bearer ${token}` } : undefined
+          })(),
+        })
+          .then((response) => {
+            if (!response.ok) {
+              throw new Error(`图片拉取失败: ${response.status}`)
+            }
+            return response.blob()
+          })
+          .then((blob) => {
+            const objectUrl = URL.createObjectURL(blob)
+            imageObjectUrlBySource.set(src, objectUrl)
+            const fallbackImage = new Image()
+            fallbackImage.onload = () => {
+              imageElementCache.set(src, fallbackImage)
+              scheduleRender()
+            }
+            fallbackImage.onerror = () => {
+              scheduleRender()
+            }
+            fallbackImage.src = objectUrl
+          })
+          .catch(() => {
+            scheduleRender()
+          })
+          .finally(() => {
+            imageFallbackLoading.delete(src)
+          })
+      } else {
+        scheduleRender()
+      }
     }
     image.src = src
     imageElementCache.set(src, image)
   }
 
-  ctx.fillStyle = '#f8fafc'
-  ctx.fillRect(x, y, width, height)
-  ctx.strokeStyle = '#cbd5e1'
-  ctx.strokeRect(x, y, width, height)
+  withRotation(() => {
+    ctx.fillStyle = '#f8fafc'
+    ctx.fillRect(x, y, width, height)
+    ctx.strokeStyle = '#cbd5e1'
+    ctx.strokeRect(x, y, width, height)
+  })
 }
 
 const drawGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
@@ -970,6 +1239,37 @@ const drawSelection = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   handles.forEach((point) => {
     ctx.fillRect(point.x - 3, point.y - 3, 6, 6)
   })
+  if (
+    graphic.objectType === 'rect' ||
+    graphic.objectType === 'circle' ||
+    graphic.objectType === 'text' ||
+    graphic.objectType === 'image' ||
+    graphic.objectType === 'path'
+  ) {
+    const rotateHandle = getRotateHandlePoint(graphic)
+    ctx.beginPath()
+    ctx.moveTo(bounds.x + bounds.width / 2, bounds.y)
+    ctx.lineTo(rotateHandle.x, rotateHandle.y)
+    ctx.strokeStyle = ctx.fillStyle as string
+    ctx.lineWidth = 1
+    ctx.stroke()
+    ctx.beginPath()
+    ctx.arc(rotateHandle.x, rotateHandle.y, 4, 0, Math.PI * 2)
+    ctx.fill()
+  }
+  if (graphic.isLocked) {
+    const text = '已锁定'
+    ctx.font = '12px sans-serif'
+    const textWidth = ctx.measureText(text).width
+    const labelX = bounds.x + bounds.width - textWidth - 14
+    const labelY = bounds.y + 6
+    ctx.fillStyle = '#111827'
+    ctx.globalAlpha = 0.8
+    ctx.fillRect(labelX - 6, labelY - 2, textWidth + 10, 16)
+    ctx.globalAlpha = 1
+    ctx.fillStyle = '#fff'
+    ctx.fillText(text, labelX, labelY + 10)
+  }
 
   if (isConflictFocused && conflictFocus.fields.length > 0) {
     const text = `冲突字段: ${conflictFocus.fields.join(', ')}`
@@ -987,6 +1287,42 @@ const drawSelection = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
     ctx.fillStyle = '#991b1b'
     ctx.fillText(text, labelX + padX, labelY + 13)
   }
+  ctx.restore()
+}
+
+const drawMultiSelectionBounds = (ctx: CanvasRenderingContext2D) => {
+  const bounds = selectedGraphicsBounds.value
+  if (!bounds || selectedGraphics.value.length < 2) {
+    return
+  }
+  ctx.save()
+  ctx.strokeStyle = '#2563eb'
+  ctx.lineWidth = 1
+  ctx.setLineDash([6, 4])
+  ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height)
+  const handles: Point[] = [
+    { x: bounds.x, y: bounds.y },
+    { x: bounds.x + bounds.width / 2, y: bounds.y },
+    { x: bounds.x + bounds.width, y: bounds.y },
+    { x: bounds.x, y: bounds.y + bounds.height / 2 },
+    { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 },
+    { x: bounds.x, y: bounds.y + bounds.height },
+    { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height },
+    { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+  ]
+  ctx.setLineDash([])
+  ctx.fillStyle = '#2563eb'
+  handles.forEach((p) => ctx.fillRect(p.x - 3, p.y - 3, 6, 6))
+  const rotate = { x: bounds.x + bounds.width / 2, y: bounds.y - ROTATE_HANDLE_OFFSET }
+  ctx.beginPath()
+  ctx.moveTo(bounds.x + bounds.width / 2, bounds.y)
+  ctx.lineTo(rotate.x, rotate.y)
+  ctx.strokeStyle = '#2563eb'
+  ctx.lineWidth = 1
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.arc(rotate.x, rotate.y, 4, 0, Math.PI * 2)
+  ctx.fill()
   ctx.restore()
 }
 
@@ -1016,6 +1352,10 @@ const drawSelectionRectOverlay = (ctx: CanvasRenderingContext2D) => {
 const getResizeHandlePoints = (graphic: GraphicVO): Record<ResizeHandleKey, Point> => {
   const bounds = getGraphicBounds(graphic)
   return {
+    n: { x: bounds.x + bounds.width / 2, y: bounds.y },
+    s: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height },
+    e: { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 },
+    w: { x: bounds.x, y: bounds.y + bounds.height / 2 },
     nw: { x: bounds.x, y: bounds.y },
     ne: { x: bounds.x + bounds.width, y: bounds.y },
     sw: { x: bounds.x, y: bounds.y + bounds.height },
@@ -1023,14 +1363,82 @@ const getResizeHandlePoints = (graphic: GraphicVO): Record<ResizeHandleKey, Poin
   }
 }
 
+const getRotateHandlePoint = (graphic: GraphicVO): Point => {
+  const bounds = getGraphicBounds(graphic)
+  return {
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y - ROTATE_HANDLE_OFFSET,
+  }
+}
+
+const hitRotateHandle = (point: Point, graphic: GraphicVO): boolean => {
+  if (graphic.objectType === 'line') {
+    return false
+  }
+  const rotatePoint = getRotateHandlePoint(graphic)
+  return (
+    Math.abs(point.x - rotatePoint.x) <= ROTATE_HANDLE_HIT_SIZE &&
+    Math.abs(point.y - rotatePoint.y) <= ROTATE_HANDLE_HIT_SIZE
+  )
+}
+
+const getBoundsResizeHandles = (bounds: { x: number; y: number; width: number; height: number }): Record<ResizeHandleKey, Point> => ({
+  n: { x: bounds.x + bounds.width / 2, y: bounds.y },
+  s: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height },
+  e: { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 },
+  w: { x: bounds.x, y: bounds.y + bounds.height / 2 },
+  nw: { x: bounds.x, y: bounds.y },
+  ne: { x: bounds.x + bounds.width, y: bounds.y },
+  sw: { x: bounds.x, y: bounds.y + bounds.height },
+  se: { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+})
+
+const hitResizeHandleByBounds = (
+  point: Point,
+  bounds: { x: number; y: number; width: number; height: number },
+): ResizeHandleKey | null => {
+  const handles = getBoundsResizeHandles(bounds)
+  for (const key of Object.keys(handles) as ResizeHandleKey[]) {
+    const handle = handles[key]
+    if (Math.abs(point.x - handle.x) <= RESIZE_HANDLE_HIT_SIZE && Math.abs(point.y - handle.y) <= RESIZE_HANDLE_HIT_SIZE) {
+      return key
+    }
+  }
+  return null
+}
+
+const hitRotateHandleByBounds = (point: Point, bounds: { x: number; y: number; width: number; height: number }) => {
+  const rotate = { x: bounds.x + bounds.width / 2, y: bounds.y - ROTATE_HANDLE_OFFSET }
+  return Math.abs(point.x - rotate.x) <= ROTATE_HANDLE_HIT_SIZE && Math.abs(point.y - rotate.y) <= ROTATE_HANDLE_HIT_SIZE
+}
+
 const hitResizeHandle = (point: Point, graphic: GraphicVO): ResizeHandleKey | null => {
-  if (
-    graphic.objectType !== 'rect' &&
-    graphic.objectType !== 'circle' &&
-    graphic.objectType !== 'text' &&
-    graphic.objectType !== 'image'
-  ) {
-    return null
+  if (graphic.objectType === 'line') {
+    const bounds = getGraphicBounds(graphic)
+    const start = { x: graphic.positionX, y: graphic.positionY }
+    const end = { x: graphic.positionX + (graphic.width ?? 0), y: graphic.positionY + (graphic.height ?? 0) }
+    const startHit =
+      Math.abs(point.x - start.x) <= RESIZE_HANDLE_HIT_SIZE && Math.abs(point.y - start.y) <= RESIZE_HANDLE_HIT_SIZE
+    const endHit =
+      Math.abs(point.x - end.x) <= RESIZE_HANDLE_HIT_SIZE && Math.abs(point.y - end.y) <= RESIZE_HANDLE_HIT_SIZE
+    if (startHit) {
+      const chooseW = end.x >= start.x
+      const chooseN = end.y >= start.y
+      if (chooseW && chooseN) return 'nw'
+      if (!chooseW && chooseN) return 'ne'
+      if (chooseW && !chooseN) return 'sw'
+      return 'se'
+    }
+    if (endHit) {
+      const chooseW = start.x >= end.x
+      const chooseN = start.y >= end.y
+      if (chooseW && chooseN) return 'nw'
+      if (!chooseW && chooseN) return 'ne'
+      if (chooseW && !chooseN) return 'sw'
+      return 'se'
+    }
+    const boxHandle = hitResizeHandleByBounds(point, bounds)
+    return boxHandle
   }
   if (graphic.objectType === 'text') {
     const se = getResizeHandlePoints(graphic).se
@@ -1064,50 +1472,244 @@ const normalizeResizeRectFromHandle = (anchor: Point, moving: Point) => {
   }
 }
 
-const updateGraphicByResize = (graphic: GraphicVO, handle: ResizeHandleKey, moving: Point): GraphicVO => {
-  const bounds = getGraphicBounds(graphic)
-  const anchor: Point =
-    handle === 'nw'
-      ? { x: bounds.x + bounds.width, y: bounds.y + bounds.height }
-      : handle === 'ne'
-        ? { x: bounds.x, y: bounds.y + bounds.height }
-        : handle === 'sw'
-          ? { x: bounds.x + bounds.width, y: bounds.y }
-          : { x: bounds.x, y: bounds.y }
+const resizeBoundsByHandle = (
+  bounds: { x: number; y: number; width: number; height: number },
+  handle: ResizeHandleKey,
+  moving: Point,
+) => {
+  let left = bounds.x
+  let right = bounds.x + bounds.width
+  let top = bounds.y
+  let bottom = bounds.y + bounds.height
 
-  if (graphic.objectType === 'rect') {
-    const rect = normalizeResizeRectFromHandle(anchor, moving)
-    return {
-      ...graphic,
-      positionX: rect.x,
-      positionY: rect.y,
-      width: rect.width,
-      height: rect.height,
-    }
+  if (handle.includes('w')) {
+    left = moving.x
+  }
+  if (handle.includes('e')) {
+    right = moving.x
+  }
+  if (handle.includes('n')) {
+    top = moving.y
+  }
+  if (handle.includes('s')) {
+    bottom = moving.y
+  }
+  if (handle === 'n' || handle === 's') {
+    left = bounds.x
+    right = bounds.x + bounds.width
+  }
+  if (handle === 'e' || handle === 'w') {
+    top = bounds.y
+    bottom = bounds.y + bounds.height
   }
 
-  if (graphic.objectType === 'image') {
-    const rect = normalizeResizeRectFromHandle(anchor, moving)
+  const normalized = normalizeRect(left, top, right - left, bottom - top)
+  return {
+    x: normalized.x,
+    y: normalized.y,
+    width: Math.max(RESIZE_MIN_SIZE, normalized.width),
+    height: Math.max(RESIZE_MIN_SIZE, normalized.height),
+  }
+}
+
+const applyTransformToGraphic = (
+  original: GraphicVO,
+  sourceBounds: { x: number; y: number; width: number; height: number },
+  targetBounds: { x: number; y: number; width: number; height: number },
+): GraphicVO => {
+  const sx = sourceBounds.width === 0 ? 1 : targetBounds.width / sourceBounds.width
+  const sy = sourceBounds.height === 0 ? 1 : targetBounds.height / sourceBounds.height
+  const graphicBounds = getGraphicBounds(original)
+  const originalCenter = getGraphicCenter(original)
+  const relX = graphicBounds.x - sourceBounds.x
+  const relY = graphicBounds.y - sourceBounds.y
+  const nextX = targetBounds.x + relX * sx
+  const nextY = targetBounds.y + relY * sy
+  const nextWidth = Math.max(1, graphicBounds.width * sx)
+  const nextHeight = Math.max(1, graphicBounds.height * sy)
+
+  if (original.objectType === 'circle') {
     return {
-      ...graphic,
-      positionX: rect.x,
-      positionY: rect.y,
-      width: rect.width,
-      height: rect.height,
+      ...original,
+      positionX: nextX + nextWidth / 2,
+      positionY: nextY + nextHeight / 2,
+      width: nextWidth,
+      height: nextHeight,
     }
   }
+  if (original.objectType === 'text') {
+    const fontScale = Math.max(0.5, sy)
+    return {
+      ...original,
+      positionX: nextX,
+      positionY: nextY,
+      width: nextWidth,
+      height: nextHeight,
+      fontSize: Math.max(TEXT_MIN_FONT_SIZE, Math.min(TEXT_MAX_FONT_SIZE, Math.round((original.fontSize ?? 16) * fontScale))),
+    }
+  }
+  if (original.objectType === 'path') {
+    const base = original.pathPoints ?? []
+    const nextPathPoints = base.map((p) => ({
+      x: targetBounds.x + (p.x - sourceBounds.x) * sx,
+      y: targetBounds.y + (p.y - sourceBounds.y) * sy,
+    }))
+    return {
+      ...original,
+      positionX: nextX,
+      positionY: nextY,
+      width: nextWidth,
+      height: nextHeight,
+      pathPoints: nextPathPoints,
+    }
+  }
+  if (original.objectType === 'line') {
+    const start = { x: original.positionX, y: original.positionY }
+    const end = { x: original.positionX + (original.width ?? 0), y: original.positionY + (original.height ?? 0) }
+    const nextStart = {
+      x: targetBounds.x + (start.x - sourceBounds.x) * sx,
+      y: targetBounds.y + (start.y - sourceBounds.y) * sy,
+    }
+    const nextEnd = {
+      x: targetBounds.x + (end.x - sourceBounds.x) * sx,
+      y: targetBounds.y + (end.y - sourceBounds.y) * sy,
+    }
+    return {
+      ...original,
+      positionX: nextStart.x,
+      positionY: nextStart.y,
+      width: nextEnd.x - nextStart.x,
+      height: nextEnd.y - nextStart.y,
+    }
+  }
+  return {
+    ...original,
+    positionX: nextX,
+    positionY: nextY,
+    width: nextWidth,
+    height: nextHeight,
+    ...(original.objectType !== 'rect' && original.objectType !== 'image'
+      ? {
+          rotation: original.rotation,
+          positionX: targetBounds.x + (originalCenter.x - sourceBounds.x) * sx,
+          positionY: targetBounds.y + (originalCenter.y - sourceBounds.y) * sy,
+        }
+      : {}),
+  }
+}
 
-  if (graphic.objectType === 'text') {
+const rotatePointAround = (point: Point, center: Point, angle: number): Point => {
+  const cos = Math.cos(angle)
+  const sin = Math.sin(angle)
+  const dx = point.x - center.x
+  const dy = point.y - center.y
+  return {
+    x: center.x + dx * cos - dy * sin,
+    y: center.y + dx * sin + dy * cos,
+  }
+}
+
+const applyRotateToGraphic = (original: GraphicVO, center: Point, deltaAngle: number): GraphicVO => {
+  const originalCenter = getGraphicCenter(original)
+  const rotatedCenter = rotatePointAround(originalCenter, center, deltaAngle)
+  const nextRotation = (((original.rotation ?? 0) + (deltaAngle * 180) / Math.PI) % 360 + 360) % 360
+  if (original.objectType === 'path') {
+    const nextPath = (original.pathPoints ?? []).map((p) => rotatePointAround(p, center, deltaAngle))
+    return {
+      ...original,
+      positionX: rotatedCenter.x,
+      positionY: rotatedCenter.y,
+      rotation: Math.round(nextRotation),
+      pathPoints: nextPath,
+    }
+  }
+  if (original.objectType === 'line') {
+    const start = rotatePointAround({ x: original.positionX, y: original.positionY }, center, deltaAngle)
+    const end = rotatePointAround(
+      { x: original.positionX + (original.width ?? 0), y: original.positionY + (original.height ?? 0) },
+      center,
+      deltaAngle,
+    )
+    return {
+      ...original,
+      positionX: start.x,
+      positionY: start.y,
+      width: end.x - start.x,
+      height: end.y - start.y,
+      rotation: Math.round(nextRotation),
+    }
+  }
+  if (original.objectType === 'circle') {
+    return {
+      ...original,
+      positionX: rotatedCenter.x,
+      positionY: rotatedCenter.y,
+      rotation: Math.round(nextRotation),
+    }
+  }
+  if (original.objectType === 'rect' || original.objectType === 'image' || original.objectType === 'text') {
+    const bounds = getGraphicBounds(original)
+    return {
+      ...original,
+      positionX: rotatedCenter.x - bounds.width / 2,
+      positionY: rotatedCenter.y - bounds.height / 2,
+      rotation: Math.round(nextRotation),
+    }
+  }
+  return {
+    ...original,
+    positionX: rotatedCenter.x,
+    positionY: rotatedCenter.y,
+    rotation: Math.round(nextRotation),
+  }
+}
+
+const rotateGraphicAround = (graphic: GraphicVO, center: Point, targetRotationDeg: number): GraphicVO => {
+  const originalRotation = graphic.rotation ?? 0
+  const deltaAngle = ((targetRotationDeg - originalRotation) * Math.PI) / 180
+  if (Math.abs(deltaAngle) < 1e-6) {
+    return {
+      ...graphic,
+      rotation: Math.round(targetRotationDeg),
+    }
+  }
+  return applyRotateToGraphic(graphic, center, deltaAngle)
+}
+
+const updateGraphicByResize = (
+  graphic: GraphicVO,
+  handle: ResizeHandleKey,
+  moving: Point,
+  sourceGraphic?: GraphicVO | null,
+): GraphicVO => {
+  const base = sourceGraphic ?? graphic
+  const bounds = getGraphicBounds(base)
+  const anchor: Point = (() => {
+    if (handle === 'nw') return { x: bounds.x + bounds.width, y: bounds.y + bounds.height }
+    if (handle === 'ne') return { x: bounds.x, y: bounds.y + bounds.height }
+    if (handle === 'sw') return { x: bounds.x + bounds.width, y: bounds.y }
+    if (handle === 'se') return { x: bounds.x, y: bounds.y }
+    if (handle === 'n') return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height }
+    if (handle === 's') return { x: bounds.x + bounds.width / 2, y: bounds.y }
+    if (handle === 'e') return { x: bounds.x, y: bounds.y + bounds.height / 2 }
+    return { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 }
+  })()
+
+  if (base.objectType === 'rect' || base.objectType === 'image' || base.objectType === 'path' || base.objectType === 'line') {
+    return applyTransformToGraphic(base, bounds, resizeBoundsByHandle(bounds, handle, moving))
+  }
+
+  if (base.objectType === 'text') {
     const rect = normalizeResizeRectFromHandle(anchor, moving)
-    const originalBounds = getGraphicBounds(graphic)
+    const originalBounds = getGraphicBounds(base)
     const baseHeight = Math.max(1, originalBounds.height)
     const ratio = rect.height / baseHeight
     const nextFontSize = Math.max(
       TEXT_MIN_FONT_SIZE,
-      Math.min(TEXT_MAX_FONT_SIZE, Math.round((graphic.fontSize ?? 16) * ratio)),
+      Math.min(TEXT_MAX_FONT_SIZE, Math.round((base.fontSize ?? 16) * ratio)),
     )
     return {
-      ...graphic,
+      ...base,
       positionX: rect.x,
       positionY: rect.y,
       width: rect.width,
@@ -1116,9 +1718,20 @@ const updateGraphicByResize = (graphic: GraphicVO, handle: ResizeHandleKey, movi
     }
   }
 
+  if (base.objectType === 'circle') {
+    const targetBounds = resizeBoundsByHandle(bounds, handle, moving)
+    return {
+      ...base,
+      positionX: targetBounds.x + targetBounds.width / 2,
+      positionY: targetBounds.y + targetBounds.height / 2,
+      width: targetBounds.width,
+      height: targetBounds.height,
+    }
+  }
+
   const rect = normalizeResizeRectFromHandle(anchor, moving)
   return {
-    ...graphic,
+    ...base,
     positionX: rect.x + rect.width / 2,
     positionY: rect.y + rect.height / 2,
     width: rect.width,
@@ -1132,18 +1745,18 @@ const updateSelectedGraphicStyle = (
   if (isReadOnly.value) {
     return
   }
-  const selected = selectedGraphic.value
-  if (!selected) {
+  if (selectedGraphics.value.length === 0) {
     return
   }
-  const index = canvasStore.graphics.findIndex((item) => item.objectKey === selected.objectKey)
-  if (index === -1) {
-    return
-  }
-  const current = canvasStore.graphics[index]
-  if (!current) {
-    return
-  }
+  selectedGraphics.value.forEach((selected) => {
+    const index = canvasStore.graphics.findIndex((item) => item.objectKey === selected.objectKey)
+    if (index === -1) {
+      return
+    }
+    const current = canvasStore.graphics[index]
+    if (!current || current.isLocked) {
+      return
+    }
     const nextGraphic: GraphicVO = {
       ...current,
       ...patch,
@@ -1155,12 +1768,13 @@ const updateSelectedGraphicStyle = (
       nextGraphic.strokeWidth = current.strokeWidth
       nextGraphic.lineStyle = current.lineStyle
     }
-  canvasStore.graphics[index] = nextGraphic
-  sendUpdateGraphicPatch(nextGraphic.objectKey, {
-    ...(typeof patch.strokeColor === 'string' ? { strokeColor: patch.strokeColor } : {}),
-    ...(typeof patch.fillColor === 'string' ? { fillColor: patch.fillColor } : {}),
-    ...(typeof patch.strokeWidth === 'number' ? { strokeWidth: patch.strokeWidth } : {}),
-    ...(patch.lineStyle === 'solid' || patch.lineStyle === 'dashed' ? { lineStyle: patch.lineStyle } : {}),
+    canvasStore.graphics[index] = nextGraphic
+    sendUpdateGraphicPatch(nextGraphic.objectKey, {
+      ...(typeof patch.strokeColor === 'string' ? { strokeColor: patch.strokeColor } : {}),
+      ...(typeof patch.fillColor === 'string' ? { fillColor: patch.fillColor } : {}),
+      ...(typeof patch.strokeWidth === 'number' ? { strokeWidth: patch.strokeWidth } : {}),
+      ...(patch.lineStyle === 'solid' || patch.lineStyle === 'dashed' ? { lineStyle: patch.lineStyle } : {}),
+    })
   })
 }
 
@@ -1394,8 +2008,9 @@ const renderCanvas = () => {
   sortedGraphics.value.forEach((graphic) => drawGraphic(ctx, graphic))
   drawPreview(ctx)
   drawSelectionRectOverlay(ctx)
+  drawMultiSelectionBounds(ctx)
 
-  if (selectedGraphic.value) {
+  if (selectedGraphic.value && selectedGraphics.value.length <= 1) {
     drawSelection(ctx, selectedGraphic.value)
   }
 
@@ -1470,6 +2085,7 @@ const removeGraphic = (objectKey: string) => {
   if (selectedObjectKey.value === objectKey) {
     selectedObjectKey.value = null
   }
+  selectedObjectKeys.value = selectedObjectKeys.value.filter((item) => item !== objectKey)
   scheduleRender()
 }
 
@@ -1783,6 +2399,8 @@ const handleSessionPaused = (payload: SessionPausedData) => {
     ...sessionDetail.value,
     isPaused: payload.isPaused,
   }
+  const operator = payload.operatorUsername || (typeof payload.operatorUserId === 'number' ? `用户#${payload.operatorUserId}` : '系统')
+  feedback.info(`${operator}${payload.isPaused ? '暂停了画布' : '恢复了画布'}`)
   scheduleRender()
 }
 
@@ -2151,7 +2769,22 @@ const createExportCanvas = () => {
   }
   exportCtx.fillStyle = '#ffffff'
   exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height)
-  exportCtx.drawImage(canvas, 0, 0)
+
+  exportCtx.save()
+  exportCtx.scale(zoomScale.value, zoomScale.value)
+  exportCtx.translate(viewportOffset.value.x, viewportOffset.value.y)
+  const worldWidth = exportCanvas.width / zoomScale.value
+  const worldHeight = exportCanvas.height / zoomScale.value
+  const viewLeft = -viewportOffset.value.x
+  const viewTop = -viewportOffset.value.y
+  const viewRight = viewLeft + worldWidth
+  const viewBottom = viewTop + worldHeight
+
+  if (exportIncludeGrid.value) {
+    drawGrid(exportCtx, viewLeft, viewTop, viewRight, viewBottom)
+  }
+  sortedGraphics.value.forEach((graphic) => drawGraphic(exportCtx, graphic))
+  exportCtx.restore()
   return exportCanvas
 }
 
@@ -2427,7 +3060,19 @@ const handleCloseSession = async () => {
 }
 
 const handleToggleFocusMode = () => {
-  focusMode.value = !focusMode.value
+  if (!document.fullscreenElement) {
+    drawPageRef.value?.requestFullscreen?.().catch(() => {
+      feedback.warning('无法进入全屏，请检查浏览器权限')
+    })
+    return
+  }
+  document.exitFullscreen().catch(() => {
+    feedback.warning('退出全屏失败')
+  })
+}
+
+const handleFullscreenChange = () => {
+  focusMode.value = !!document.fullscreenElement
 }
 
 const handleShowGuide = () => {
@@ -2599,6 +3244,22 @@ const handleImageFileChange = async (event: Event) => {
   importingImage.value = true
   try {
     const uploaded = await sessionApi.uploadSessionImage(sessionKey.value, file)
+    const imageUrl = (() => {
+      const raw = (uploaded.url || '').trim()
+      if (!raw) {
+        return ''
+      }
+      if (/^https?:\/\//i.test(raw) || raw.startsWith('data:') || raw.startsWith('blob:')) {
+        return raw
+      }
+      if (raw.startsWith('/')) {
+        return `${window.location.origin}${raw}`
+      }
+      return `${window.location.origin}/${raw}`
+    })()
+    if (!imageUrl) {
+      throw new Error('上传成功但图片地址为空')
+    }
     const point = pickImageInsertPoint()
     const graphic: GraphicVO = {
       id: 0,
@@ -2613,7 +3274,7 @@ const handleImageFileChange = async (event: Event) => {
       lineStyle: 'solid',
       fillColor: null,
       strokeWidth: 1,
-      textContent: uploaded.url,
+      textContent: imageUrl,
       fontSize: null,
       pathPoints: null,
       isLocked: false,
@@ -3249,37 +3910,72 @@ const sendUpdateGraphicPatch = (objectKey: string, patch: NonNullable<import('@/
 }
 
 const deleteSelectedGraphic = () => {
-  const selected = selectedGraphic.value
+  const selectedList = selectedGraphics.value
   const session = canvasStore.currentSession
   const client = wsClient
-  if (!selected || !client || !session) {
+  if (selectedList.length === 0 || !client || !session) {
     return
   }
   if (isReadOnly.value) {
     return
   }
-  const operationId = nextOperationId('delete_graphic', selected.objectKey)
-  const lamportTime = nextLamportTime()
-  client.sendDeleteGraphicWithMeta({
-    sessionKey: session.sessionKey,
-    operationId,
-    clientId: collabClientId.value,
-    baseVersion: currentVersion.value,
-    lamportTime,
-    objectKey: selected.objectKey,
+  selectedList.forEach((selected) => {
+    if (selected.isLocked) {
+      return
+    }
+    const operationId = nextOperationId('delete_graphic', selected.objectKey)
+    const lamportTime = nextLamportTime()
+    client.sendDeleteGraphicWithMeta({
+      sessionKey: session.sessionKey,
+      operationId,
+      clientId: collabClientId.value,
+      baseVersion: currentVersion.value,
+      lamportTime,
+      objectKey: selected.objectKey,
+    })
+    removeGraphic(selected.objectKey)
+    canvasStore.pushLocalOperation(
+      buildLocalOperation('delete_graphic', selected.objectKey, {
+        ...selected,
+      }),
+    )
+    pushOperationHistory({
+      operationType: 'delete_graphic',
+      objectKey: selected.objectKey,
+      userId: currentUserId.value,
+      source: 'local',
+    })
   })
-  removeGraphic(selected.objectKey)
-  canvasStore.pushLocalOperation(
-    buildLocalOperation('delete_graphic', selected.objectKey, {
-      ...selected,
-    }),
-  )
-  pushOperationHistory({
-    operationType: 'delete_graphic',
-    objectKey: selected.objectKey,
-    userId: currentUserId.value,
-    source: 'local',
+  selectedObjectKeys.value = []
+  selectedObjectKey.value = null
+}
+
+const handleToggleLock = () => {
+  if (isReadOnly.value || selectedGraphics.value.length === 0) {
+    return
+  }
+  const nextLocked = !selectedLocked.value
+  selectedGraphics.value.forEach((graphic) => {
+    const index = canvasStore.graphics.findIndex((item) => item.objectKey === graphic.objectKey)
+    if (index === -1) {
+      return
+    }
+    const current = canvasStore.graphics[index]
+    if (!current) {
+      return
+    }
+    if (current.isLocked === nextLocked) {
+      return
+    }
+    const next: GraphicVO = {
+      ...current,
+      isLocked: nextLocked,
+      updatedAt: new Date().toISOString(),
+    }
+    canvasStore.graphics[index] = next
+    sendUpdateGraphicPatch(next.objectKey, { isLocked: nextLocked })
   })
+  scheduleRender()
 }
 
 const isBoundsOverlapped = (
@@ -3521,20 +4217,67 @@ const handleMouseDown = (event: MouseEvent) => {
 
   if (activeTool.value === 'text') {
     selectedObjectKey.value = null
+    selectedObjectKeys.value = []
     scheduleRender()
     return
   }
 
   if (activeTool.value === 'select') {
+    if (selectedObjectKeys.value.length > 1 && selectedGraphicsBounds.value && !isReadOnly.value) {
+      const bounds = selectedGraphicsBounds.value
+      if (hitRotateHandleByBounds(point, bounds)) {
+        const originals: Record<string, GraphicVO> = {}
+        selectedGraphics.value.forEach((item) => {
+          originals[item.objectKey] = { ...item, pathPoints: item.pathPoints ? item.pathPoints.map((p) => ({ x: p.x, y: p.y })) : null }
+        })
+        groupRotateState.value = {
+          active: true,
+          center: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
+          startAngle: Math.atan2(point.y - (bounds.y + bounds.height / 2), point.x - (bounds.x + bounds.width / 2)),
+          originalGraphics: originals,
+        }
+        scheduleRender()
+        return
+      }
+      const groupHandle = hitResizeHandleByBounds(point, bounds)
+      if (groupHandle) {
+        const originals: Record<string, GraphicVO> = {}
+        selectedGraphics.value.forEach((item) => {
+          originals[item.objectKey] = { ...item, pathPoints: item.pathPoints ? item.pathPoints.map((p) => ({ x: p.x, y: p.y })) : null }
+        })
+        groupResizeState.value = {
+          active: true,
+          handle: groupHandle,
+          originalBounds: { ...bounds },
+          originalGraphics: originals,
+        }
+        scheduleRender()
+        return
+      }
+    }
+
     const selected = selectedGraphic.value
-    if (selected) {
+  if (selected && selectedGraphics.value.length === 1) {
+      if (!isReadOnly.value && !selected.isLocked && hitRotateHandle(point, selected)) {
+        const center = getGraphicCenter(selected)
+        rotateState.value = {
+          active: true,
+          objectKey: selected.objectKey,
+          center,
+          startAngle: Math.atan2(point.y - center.y, point.x - center.x),
+          originalRotation: selected.rotation || 0,
+          originalGraphic: { ...selected, pathPoints: selected.pathPoints ? selected.pathPoints.map((p) => ({ x: p.x, y: p.y })) : null },
+        }
+        scheduleRender()
+        return
+      }
       const handle = hitResizeHandle(point, selected)
       if (handle) {
         resizeState.value = {
           active: true,
           objectKey: selected.objectKey,
           handle,
-          originalGraphic: { ...selected },
+          originalGraphic: { ...selected, pathPoints: selected.pathPoints ? selected.pathPoints.map((p) => ({ x: p.x, y: p.y })) : null },
         }
         scheduleRender()
         return
@@ -3542,12 +4285,52 @@ const handleMouseDown = (event: MouseEvent) => {
     }
 
     const target = pickGraphic(point)
-    selectedObjectKey.value = target?.objectKey ?? null
+    const additive = event.shiftKey || event.ctrlKey || event.metaKey
+    if (target) {
+      if (additive) {
+        const next = new Set(selectedObjectKeys.value)
+        if (next.has(target.objectKey)) {
+          next.delete(target.objectKey)
+        } else {
+          next.add(target.objectKey)
+        }
+        selectedObjectKeys.value = [...next]
+        selectedObjectKey.value = selectedObjectKeys.value[selectedObjectKeys.value.length - 1] ?? null
+      } else {
+        selectedObjectKeys.value = [target.objectKey]
+        selectedObjectKey.value = target.objectKey
+      }
+    } else if (!additive) {
+      selectedObjectKey.value = null
+      selectedObjectKeys.value = []
+    }
     if (target && !isReadOnly.value && target.isLocked) {
       scheduleRender()
       return
     }
     if (target && !isReadOnly.value) {
+      if (selectedObjectKeys.value.length > 1 && selectedObjectKeys.value.includes(target.objectKey)) {
+        const baseByKey: Record<string, { x: number; y: number; pathPoints: Point[] | null }> = {}
+        selectedGraphics.value.forEach((item) => {
+          baseByKey[item.objectKey] = {
+            x: item.positionX,
+            y: item.positionY,
+            pathPoints: item.pathPoints ? item.pathPoints.map((p) => ({ x: p.x, y: p.y })) : null,
+          }
+        })
+        multiDrag.value = {
+          active: true,
+          objectKeys: [...selectedObjectKeys.value],
+          start: point,
+          baseByKey,
+        }
+        scheduleRender()
+        return
+      }
+      if (!selectedObjectKeys.value.includes(target.objectKey)) {
+        selectedObjectKeys.value = [target.objectKey]
+        selectedObjectKey.value = target.objectKey
+      }
       dragMove.value = {
         active: true,
         objectKey: target.objectKey,
@@ -3573,6 +4356,7 @@ const handleMouseDown = (event: MouseEvent) => {
       return
     }
     selectedObjectKey.value = null
+    selectedObjectKeys.value = []
     draft.value = {
       active: true,
       start: point,
@@ -3587,6 +4371,7 @@ const handleMouseDown = (event: MouseEvent) => {
     return
   }
   selectedObjectKey.value = null
+  selectedObjectKeys.value = []
   draft.value = {
     active: true,
     start: point,
@@ -3607,6 +4392,7 @@ const handleCanvasClick = (event: MouseEvent) => {
   const target = pickGraphic(point)
   if (target?.objectType === 'text') {
     selectedObjectKey.value = target.objectKey
+    selectedObjectKeys.value = [target.objectKey]
     startEditTextGraphic(target)
     scheduleRender()
     return
@@ -3625,6 +4411,7 @@ const handleCanvasDblClick = (event: MouseEvent) => {
   const target = pickGraphic(point)
   if (target?.objectType === 'text') {
     selectedObjectKey.value = target.objectKey
+    selectedObjectKeys.value = [target.objectKey]
     startEditTextGraphic(target)
     scheduleRender()
   }
@@ -3651,6 +4438,76 @@ const handleMouseMove = (event: MouseEvent) => {
     return
   }
 
+  if (groupRotateState.value.active && selectedObjectKeys.value.length > 1) {
+    const angle = Math.atan2(point.y - groupRotateState.value.center.y, point.x - groupRotateState.value.center.x)
+    const delta = angle - groupRotateState.value.startAngle
+    selectedObjectKeys.value.forEach((objectKey) => {
+      const original = groupRotateState.value.originalGraphics[objectKey]
+      if (!original || original.isLocked) {
+        return
+      }
+      const index = canvasStore.graphics.findIndex((item) => item.objectKey === objectKey)
+      if (index === -1) {
+        return
+      }
+      canvasStore.graphics[index] = applyRotateToGraphic(original, groupRotateState.value.center, delta)
+    })
+    scheduleRender()
+    return
+  }
+
+  if (groupResizeState.value.active && selectedObjectKeys.value.length > 1) {
+    const sourceBounds = groupResizeState.value.originalBounds
+    const handle = groupResizeState.value.handle
+    if (!sourceBounds || !handle) {
+      return
+    }
+    const targetBounds = resizeBoundsByHandle(sourceBounds, handle, point)
+    selectedObjectKeys.value.forEach((objectKey) => {
+      const original = groupResizeState.value.originalGraphics[objectKey]
+      if (!original || original.isLocked) {
+        return
+      }
+      const index = canvasStore.graphics.findIndex((item) => item.objectKey === objectKey)
+      if (index === -1) {
+        return
+      }
+      const transformed = applyTransformToGraphic(original, sourceBounds, targetBounds)
+      if (
+        original.objectType === 'rect' ||
+        original.objectType === 'image' ||
+        original.objectType === 'text' ||
+        original.objectType === 'circle' ||
+        original.objectType === 'path'
+      ) {
+        const sourceCenter = {
+          x: sourceBounds.x + sourceBounds.width / 2,
+          y: sourceBounds.y + sourceBounds.height / 2,
+        }
+        canvasStore.graphics[index] = rotateGraphicAround(transformed, sourceCenter, original.rotation ?? 0)
+      } else {
+        canvasStore.graphics[index] = transformed
+      }
+    })
+    scheduleRender()
+    return
+  }
+
+  if (rotateState.value.active && activeTool.value === 'select') {
+    const index = canvasStore.graphics.findIndex((item) => item.objectKey === rotateState.value.objectKey)
+    if (index !== -1) {
+      const original = rotateState.value.originalGraphic
+      if (original) {
+        const angle = Math.atan2(point.y - rotateState.value.center.y, point.x - rotateState.value.center.x)
+        const delta = angle - rotateState.value.startAngle
+        const nextDeg = (rotateState.value.originalRotation + (delta * 180) / Math.PI + 360) % 360
+        canvasStore.graphics[index] = rotateGraphicAround(original, rotateState.value.center, Math.round(nextDeg))
+        scheduleRender()
+      }
+    }
+    return
+  }
+
   if (selectionRect.value.active && activeTool.value === 'select') {
     selectionRect.value.end = point
     scheduleRender()
@@ -3671,11 +4528,19 @@ const handleMouseMove = (event: MouseEvent) => {
       current.objectType !== 'rect' &&
       current.objectType !== 'circle' &&
       current.objectType !== 'text' &&
-      current.objectType !== 'image'
+      current.objectType !== 'image' &&
+      current.objectType !== 'path' &&
+      current.objectType !== 'line'
     ) {
       return
     }
-    canvasStore.graphics[index] = updateGraphicByResize(current, handle, point)
+    const source = resizeState.value.originalGraphic
+    const resized = updateGraphicByResize(current, handle, point, source)
+    if (source) {
+      canvasStore.graphics[index] = rotateGraphicAround(resized, getGraphicCenter(source), source.rotation ?? 0)
+    } else {
+      canvasStore.graphics[index] = resized
+    }
     scheduleRender()
     return
   }
@@ -3709,6 +4574,42 @@ const handleMouseMove = (event: MouseEvent) => {
         positionY: dragMove.value.baseY + dy,
       }
     }
+    scheduleRender()
+    return
+  }
+
+  if (multiDrag.value.active && activeTool.value === 'select') {
+    const dx = point.x - multiDrag.value.start.x
+    const dy = point.y - multiDrag.value.start.y
+    multiDrag.value.objectKeys.forEach((objectKey) => {
+      const index = canvasStore.graphics.findIndex((item) => item.objectKey === objectKey)
+      const base = multiDrag.value.baseByKey[objectKey]
+      if (index === -1 || !base) {
+        return
+      }
+      const current = canvasStore.graphics[index]
+      if (!current || current.isLocked) {
+        return
+      }
+      if (current.objectType === 'path') {
+        const movedPoints = (base.pathPoints ?? current.pathPoints ?? []).map((item) => ({
+          x: item.x + dx,
+          y: item.y + dy,
+        }))
+        canvasStore.graphics[index] = {
+          ...current,
+          positionX: base.x + dx,
+          positionY: base.y + dy,
+          pathPoints: movedPoints,
+        }
+      } else {
+        canvasStore.graphics[index] = {
+          ...current,
+          positionX: base.x + dx,
+          positionY: base.y + dy,
+        }
+      }
+    })
     scheduleRender()
     return
   }
@@ -3748,9 +4649,7 @@ const handleMouseUp = () => {
     )
     selectionRect.value.active = false
     if (rect.width >= 4 && rect.height >= 4) {
-      const picked = [...sortedGraphics.value]
-        .reverse()
-        .find((item) => {
+      const picked = [...sortedGraphics.value].filter((item) => {
           const bounds = getGraphicBounds(item)
           return (
             bounds.x >= rect.x &&
@@ -3759,9 +4658,96 @@ const handleMouseUp = () => {
             bounds.y + bounds.height <= rect.y + rect.height
           )
         })
-      selectedObjectKey.value = picked?.objectKey ?? null
+      if (picked.length > 0) {
+        selectedObjectKeys.value = picked.map((item) => item.objectKey)
+        const topMost = [...picked].sort((a, b) => b.zIndex - a.zIndex)[0]
+        selectedObjectKey.value = topMost?.objectKey ?? null
+      } else {
+        selectedObjectKey.value = null
+        selectedObjectKeys.value = []
+      }
     }
     scheduleRender()
+    return
+  }
+
+  if (groupRotateState.value.active) {
+    selectedObjectKeys.value.forEach((objectKey) => {
+      const index = canvasStore.graphics.findIndex((item) => item.objectKey === objectKey)
+      const original = groupRotateState.value.originalGraphics[objectKey]
+      if (index === -1 || !original) {
+        return
+      }
+      const current = canvasStore.graphics[index]
+      if (!current) {
+        return
+      }
+      if (
+        current.positionX !== original.positionX ||
+        current.positionY !== original.positionY ||
+        current.rotation !== original.rotation ||
+        JSON.stringify(current.pathPoints ?? null) !== JSON.stringify(original.pathPoints ?? null)
+      ) {
+        sendUpdateGraphicPatch(current.objectKey, {
+          positionX: current.positionX,
+          positionY: current.positionY,
+          rotation: current.rotation,
+          ...(Array.isArray(current.pathPoints) ? { pathPoints: current.pathPoints } : {}),
+        })
+      }
+    })
+    groupRotateState.value.active = false
+    groupRotateState.value.originalGraphics = {}
+    return
+  }
+
+  if (groupResizeState.value.active) {
+    selectedObjectKeys.value.forEach((objectKey) => {
+      const index = canvasStore.graphics.findIndex((item) => item.objectKey === objectKey)
+      const original = groupResizeState.value.originalGraphics[objectKey]
+      if (index === -1 || !original) {
+        return
+      }
+      const current = canvasStore.graphics[index]
+      if (!current) {
+        return
+      }
+      if (
+        current.positionX !== original.positionX ||
+        current.positionY !== original.positionY ||
+        current.width !== original.width ||
+        current.height !== original.height ||
+        current.fontSize !== original.fontSize ||
+        JSON.stringify(current.pathPoints ?? null) !== JSON.stringify(original.pathPoints ?? null)
+      ) {
+        sendUpdateGraphicPatch(current.objectKey, {
+          positionX: current.positionX,
+          positionY: current.positionY,
+          ...(typeof current.width === 'number' ? { width: current.width } : {}),
+          ...(typeof current.height === 'number' ? { height: current.height } : {}),
+          ...(typeof current.fontSize === 'number' ? { fontSize: current.fontSize } : {}),
+          ...(Array.isArray(current.pathPoints) ? { pathPoints: current.pathPoints } : {}),
+        })
+      }
+    })
+    groupResizeState.value.active = false
+    groupResizeState.value.handle = null
+    groupResizeState.value.originalBounds = null
+    groupResizeState.value.originalGraphics = {}
+    return
+  }
+
+  if (rotateState.value.active) {
+    const index = canvasStore.graphics.findIndex((item) => item.objectKey === rotateState.value.objectKey)
+    if (index !== -1) {
+      const current = canvasStore.graphics[index]
+      if (current && current.rotation !== rotateState.value.originalRotation) {
+        sendUpdateGraphicPatch(current.objectKey, { rotation: current.rotation })
+      }
+    }
+    rotateState.value.active = false
+    rotateState.value.objectKey = ''
+    rotateState.value.originalGraphic = null
     return
   }
 
@@ -3776,7 +4762,9 @@ const handleMouseUp = () => {
       (resized.positionX !== original.positionX ||
         resized.positionY !== original.positionY ||
         resized.width !== original.width ||
-        resized.height !== original.height)
+        resized.height !== original.height ||
+        resized.rotation !== original.rotation ||
+        JSON.stringify(resized.pathPoints ?? null) !== JSON.stringify(original.pathPoints ?? null))
     ) {
       sendUpdateGraphicPatch(resized.objectKey, {
         positionX: resized.positionX,
@@ -3784,6 +4772,8 @@ const handleMouseUp = () => {
         ...(typeof resized.width === 'number' ? { width: resized.width } : {}),
         ...(typeof resized.height === 'number' ? { height: resized.height } : {}),
         ...(typeof resized.fontSize === 'number' ? { fontSize: resized.fontSize } : {}),
+        ...(typeof resized.rotation === 'number' ? { rotation: resized.rotation } : {}),
+        ...(Array.isArray(resized.pathPoints) ? { pathPoints: resized.pathPoints } : {}),
       })
     }
     resizeState.value.originalGraphic = null
@@ -3820,6 +4810,37 @@ const handleMouseUp = () => {
     return
   }
 
+  if (multiDrag.value.active) {
+    const movedKeys = [...multiDrag.value.objectKeys]
+    movedKeys.forEach((objectKey) => {
+      const index = canvasStore.graphics.findIndex((item) => item.objectKey === objectKey)
+      const base = multiDrag.value.baseByKey[objectKey]
+      if (index === -1 || !base) {
+        return
+      }
+      const current = canvasStore.graphics[index]
+      if (!current) {
+        return
+      }
+      const moved =
+        current.positionX !== base.x ||
+        current.positionY !== base.y ||
+        JSON.stringify(current.pathPoints ?? null) !== JSON.stringify(base.pathPoints ?? null)
+      if (!moved) {
+        return
+      }
+      sendUpdateGraphicPatch(current.objectKey, {
+        positionX: current.positionX,
+        positionY: current.positionY,
+        ...(Array.isArray(current.pathPoints) ? { pathPoints: current.pathPoints } : {}),
+      })
+    })
+    multiDrag.value.active = false
+    multiDrag.value.objectKeys = []
+    multiDrag.value.baseByKey = {}
+    return
+  }
+
   if (!draft.value.active) {
     return
   }
@@ -3845,6 +4866,7 @@ const handleMouseUp = () => {
   }
   upsertGraphic(graphic)
   selectedObjectKey.value = graphic.objectKey
+  selectedObjectKeys.value = [graphic.objectKey]
   sendCreateGraphic(graphic)
 }
 
@@ -3866,9 +4888,25 @@ const handleMouseLeave = () => {
     dragMove.value.basePathPoints = null
     dragMove.value.originalGraphic = null
   }
+  if (multiDrag.value.active) {
+    multiDrag.value.active = false
+    multiDrag.value.objectKeys = []
+    multiDrag.value.baseByKey = {}
+  }
+  if (rotateState.value.active) {
+    rotateState.value.active = false
+    rotateState.value.objectKey = ''
+    rotateState.value.originalGraphic = null
+  }
   if (selectionRect.value.active) {
     selectionRect.value.active = false
   }
+  groupRotateState.value.active = false
+  groupRotateState.value.originalGraphics = {}
+  groupResizeState.value.active = false
+  groupResizeState.value.handle = null
+  groupResizeState.value.originalBounds = null
+  groupResizeState.value.originalGraphics = {}
   scheduleRender()
 }
 
@@ -3962,6 +5000,52 @@ const handleKeydown = (event: KeyboardEvent) => {
   }
 
   const key = event.key.toLowerCase()
+  if (key === 'c') {
+    if (selectedGraphics.value.length > 0) {
+      event.preventDefault()
+      clipboardGraphics.value = selectedGraphics.value.map((item) => ({
+        ...item,
+        pathPoints: item.pathPoints ? item.pathPoints.map((p) => ({ x: p.x, y: p.y })) : null,
+      }))
+      pasteCount.value = 0
+      feedback.success(`已复制 ${clipboardGraphics.value.length} 个图元`)
+    }
+    return
+  }
+  if (key === 'v') {
+    if (!isReadOnly.value && clipboardGraphics.value.length > 0 && canvasStore.currentSession) {
+      event.preventDefault()
+      pasteCount.value += 1
+      const offset = 24 * pasteCount.value
+      const created: GraphicVO[] = clipboardGraphics.value.map((item, idx) => {
+        const key = generateGraphicObjectKey()
+        const next: GraphicVO = {
+          ...item,
+          id: 0,
+          objectKey: key,
+          sessionId: canvasStore.currentSession?.sessionId ?? item.sessionId,
+          positionX: item.positionX + offset,
+          positionY: item.positionY + offset,
+          pathPoints: item.pathPoints
+            ? item.pathPoints.map((p) => ({ x: p.x + offset, y: p.y + offset }))
+            : null,
+          zIndex: canvasStore.graphics.length + idx + 1,
+          creatorId: currentUserId.value ?? 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }
+        return next
+      })
+      created.forEach((item) => {
+        upsertGraphic(item)
+        sendCreateGraphic(item)
+      })
+      selectedObjectKeys.value = created.map((item) => item.objectKey)
+      selectedObjectKey.value = selectedObjectKeys.value[selectedObjectKeys.value.length - 1] ?? null
+      feedback.success(`已粘贴 ${created.length} 个图元`)
+    }
+    return
+  }
   if (key === 'z' && event.shiftKey) {
     event.preventDefault()
     void handleRedo()
@@ -3975,6 +5059,11 @@ const handleKeydown = (event: KeyboardEvent) => {
   if (key === 'y') {
     event.preventDefault()
     void handleRedo()
+    return
+  }
+  if (key === 'l') {
+    event.preventDefault()
+    handleToggleLock()
   }
 }
 
@@ -4014,10 +5103,11 @@ watch(
 watch(
   () => strokeColor.value,
   (value) => {
-    if (syncingSelectedStyle.value || !selectedGraphic.value) {
+    if (syncingSelectedStyle.value || selectedGraphics.value.length === 0) {
       return
     }
-    if (selectedGraphic.value.strokeColor === value) {
+    const selected = selectedGraphic.value
+    if (selectedGraphics.value.length <= 1 && selected && selected.strokeColor === value) {
       return
     }
     updateSelectedGraphicStyle({ strokeColor: value })
@@ -4027,10 +5117,11 @@ watch(
 watch(
   () => strokeWidth.value,
   (value) => {
-    if (syncingSelectedStyle.value || !selectedGraphic.value) {
+    if (syncingSelectedStyle.value || selectedGraphics.value.length === 0) {
       return
     }
-    if (selectedGraphic.value.strokeWidth === value) {
+    const selected = selectedGraphic.value
+    if (selectedGraphics.value.length <= 1 && selected && selected.strokeWidth === value) {
       return
     }
     updateSelectedGraphicStyle({ strokeWidth: value })
@@ -4040,10 +5131,11 @@ watch(
 watch(
   () => lineStyle.value,
   (value) => {
-    if (syncingSelectedStyle.value || !selectedGraphic.value || !canEditLineStyle.value) {
+    if (syncingSelectedStyle.value || selectedGraphics.value.length === 0 || !canEditLineStyle.value) {
       return
     }
-    if (selectedGraphic.value.lineStyle === value) {
+    const selected = selectedGraphic.value
+    if (selectedGraphics.value.length <= 1 && selected && selected.lineStyle === value) {
       return
     }
     updateSelectedGraphicStyle({ lineStyle: value })
@@ -4053,11 +5145,12 @@ watch(
 watch(
   () => fillColor.value,
   (value) => {
-    if (syncingSelectedStyle.value || !selectedGraphic.value || !canEditFillColor.value) {
+    if (syncingSelectedStyle.value || selectedGraphics.value.length === 0 || !canEditFillColor.value) {
       return
     }
     const modelFill = value === 'transparent' ? null : value
-    if (selectedGraphic.value.fillColor === modelFill) {
+    const selected = selectedGraphic.value
+    if (selectedGraphics.value.length <= 1 && selected && selected.fillColor === modelFill) {
       return
     }
     updateSelectedGraphicStyle({ fillColor: modelFill })
@@ -4078,6 +5171,18 @@ watch(
     resizeState.value.active = false
     resizeState.value.handle = null
     resizeState.value.originalGraphic = null
+    rotateState.value.active = false
+    rotateState.value.objectKey = ''
+    rotateState.value.originalGraphic = null
+    multiDrag.value.active = false
+    multiDrag.value.objectKeys = []
+    multiDrag.value.baseByKey = {}
+    groupRotateState.value.active = false
+    groupRotateState.value.originalGraphics = {}
+    groupResizeState.value.active = false
+    groupResizeState.value.handle = null
+    groupResizeState.value.originalBounds = null
+    groupResizeState.value.originalGraphics = {}
     selectionRect.value.active = false
     scheduleRender()
   },
@@ -4101,6 +5206,7 @@ watch(
 onMounted(async () => {
   loadOrCreateClientId()
   window.addEventListener('keydown', handleKeydown)
+  document.addEventListener('fullscreenchange', handleFullscreenChange)
   document.addEventListener('visibilitychange', onVisibilityChange)
 
   await joinSession()
@@ -4116,6 +5222,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
+  document.removeEventListener('fullscreenchange', handleFullscreenChange)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   clearHeartbeat()
   clearRenderFrame()
@@ -4135,12 +5242,15 @@ onBeforeUnmount(() => {
     wsClient.disconnect()
     wsClient = null
   }
+  imageObjectUrlBySource.forEach((url) => URL.revokeObjectURL(url))
+  imageObjectUrlBySource.clear()
+  imageFallbackLoading.clear()
   canvasStore.clearSession()
 })
 </script>
 
 <template>
-  <div class="draw-page">
+  <div ref="drawPageRef" class="draw-page">
     <TopBar
       :session-name="currentSessionName"
       :members="sessionDetail?.members ?? []"
@@ -4193,6 +5303,8 @@ onBeforeUnmount(() => {
         :can-delete="canDeleteSelected"
         :can-bring-forward="canBringForward"
         :can-send-backward="canSendBackward"
+        :can-toggle-lock="canToggleLock"
+        :selected-locked="selectedLocked"
         :read-only="isReadOnly"
         :importing-image="importingImage"
         @undo="handleUndo"
@@ -4201,6 +5313,7 @@ onBeforeUnmount(() => {
         @import-image="handleImportImage"
         @bring-forward="handleBringForward"
         @send-backward="handleSendBackward"
+        @toggle-lock="handleToggleLock"
       />
 
       <section class="canvas-area">
@@ -4271,8 +5384,9 @@ onBeforeUnmount(() => {
       :lamport-time="lamportClock"
       :last-sync-at="lastSyncText"
       :reconnect-count="reconnectTotalCount"
-      :technical-mode="focusMode"
-      @update:technical-mode="focusMode = $event"
+      :technical-mode="technicalMode"
+      @update:technical-mode="technicalMode = $event"
+      @update:zoom-percent="zoomPercent = Number($event)"
     />
 
     <MemberManageDialog
@@ -4289,7 +5403,7 @@ onBeforeUnmount(() => {
       @remove-member="handleRemoveMember"
     />
 
-    <OnboardingGuide
+    <ShortcutHelpDialog
       v-model:visible="onboardingVisible"
       :steps="onboardingSteps"
     />
@@ -4331,34 +5445,29 @@ onBeforeUnmount(() => {
         <el-radio label="svg">SVG（矢量容器）</el-radio>
         <el-radio label="pdf">PDF</el-radio>
       </el-radio-group>
+      <div style="margin-top: 12px;">
+        <el-switch
+          v-model="exportIncludeGrid"
+          inline-prompt
+          active-text="带网格"
+          inactive-text="无网格"
+        />
+      </div>
       <template #footer>
         <el-button @click="exportDialogVisible = false">取消</el-button>
         <el-button type="primary" @click="confirmExportImage">导出</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="shortcutDialogVisible" title="快捷键帮助" width="420px">
+    <el-dialog v-model="shortcutDialogVisible" title="快捷键帮助" width="460px">
       <div class="shortcut-list">
-        <div class="shortcut-row">
-          <span class="shortcut-action">撤销</span>
-          <code>Ctrl + Z</code>
-        </div>
-        <div class="shortcut-row">
-          <span class="shortcut-action">重做</span>
-          <code>Ctrl + Y / Ctrl + Shift + Z</code>
-        </div>
-        <div class="shortcut-row">
-          <span class="shortcut-action">删除选中图元</span>
-          <code>Delete</code>
-        </div>
-        <div class="shortcut-row">
-          <span class="shortcut-action">文本确认</span>
-          <code>Enter</code>
-        </div>
-        <div class="shortcut-row">
-          <span class="shortcut-action">文本取消</span>
-          <code>Esc</code>
-        </div>
+        <div class="shortcut-row"><span class="shortcut-action">撤销</span><code>Ctrl/Cmd + Z</code></div>
+        <div class="shortcut-row"><span class="shortcut-action">重做</span><code>Ctrl/Cmd + Y / Ctrl/Cmd + Shift + Z</code></div>
+        <div class="shortcut-row"><span class="shortcut-action">复制图元</span><code>Ctrl/Cmd + C</code></div>
+        <div class="shortcut-row"><span class="shortcut-action">粘贴图元</span><code>Ctrl/Cmd + V</code></div>
+        <div class="shortcut-row"><span class="shortcut-action">锁定/解锁</span><code>Ctrl/Cmd + L</code></div>
+        <div class="shortcut-row"><span class="shortcut-action">删除选中</span><code>Delete</code></div>
+        <div class="shortcut-row"><span class="shortcut-action">专注模式（全屏）</span><code>F / 顶栏按钮</code></div>
       </div>
       <template #footer>
         <el-button @click="shortcutDialogVisible = false">关闭</el-button>
@@ -4521,10 +5630,16 @@ onBeforeUnmount(() => {
   color: #991b1b;
 }
 
+.history-empty {
+  color: #6b7280;
+  font-size: 13px;
+  padding: 8px 2px;
+}
+
 .shortcut-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .shortcut-row {
@@ -4541,12 +5656,6 @@ onBeforeUnmount(() => {
 .shortcut-action {
   color: #111827;
   font-size: 13px;
-}
-
-.history-empty {
-  color: #6b7280;
-  font-size: 13px;
-  padding: 8px 2px;
 }
 
 @media (max-width: 1024px) {
