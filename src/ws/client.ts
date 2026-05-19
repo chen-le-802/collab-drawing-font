@@ -9,15 +9,23 @@ import {
   type CreateGraphicData,
   type DeleteGraphicData,
   type DisconnectedEventData,
+  type CursorMoveData,
   type GraphicCreatedData,
   type GraphicDeletedData,
   type GraphicUpdatedData,
+  type PresenceCursorData,
+  type PresenceSelectionData,
   type RawGraphicCreatedData,
   type RawGraphicDeletedData,
   type RawGraphicUpdatedData,
   type RawMemberEventData,
+  type RawSessionPausedData,
+  type RawPresenceCursorData,
+  type RawPresenceSelectionData,
   type ReconnectFailedEventData,
   type ReconnectingEventData,
+  type SessionPausedData,
+  type SelectionChangeData,
   type ServerMessage,
   type ServerMessageDataMap,
   type ServerMessageType,
@@ -40,9 +48,12 @@ const HEARTBEAT_INTERVAL = 20000
 const SERVER_MESSAGE_TYPES: ReadonlySet<ServerMessageType> = new Set([
   'session_joined',
   'session_left',
+  'session_paused',
   'member_joined',
   'member_left',
   'member_status_changed',
+  'presence_cursor',
+  'presence_selection',
   'graphic_created',
   'graphic_updated',
   'graphic_deleted',
@@ -112,11 +123,14 @@ const toGraphic = (value: unknown): GraphicVO | null => {
     width: typeof value.width === 'number' ? value.width : null,
     height: typeof value.height === 'number' ? value.height : null,
     strokeColor: toString(value.strokeColor),
+    lineStyle: value.lineStyle === 'dashed' ? 'dashed' : 'solid',
     fillColor: typeof value.fillColor === 'string' ? value.fillColor : null,
     strokeWidth: toNumber(value.strokeWidth),
     textContent: typeof value.textContent === 'string' ? value.textContent : null,
     fontSize: typeof value.fontSize === 'number' ? value.fontSize : null,
     pathPoints: toPathPoints(value.pathPoints),
+    isLocked: value.isLocked === true || value.isLocked === 1,
+    rotation: toNumber(value.rotation),
     zIndex: toNumber(value.zIndex),
     version: toNumber(value.version),
     creatorId: toNumber(value.creatorId),
@@ -305,6 +319,14 @@ export class WebSocketClient {
     this.send('redo', data)
   }
 
+  sendCursorMove(data: CursorMoveData): void {
+    this.send('cursor_move', data)
+  }
+
+  sendSelectionChange(data: SelectionChangeData): void {
+    this.send('selection_change', data)
+  }
+
   isConnected(): boolean {
     return !!this.ws && this.ws.readyState === WebSocket.OPEN
   }
@@ -429,11 +451,17 @@ export class WebSocketClient {
         return this.normalizeSessionJoined(data) as ServerMessageDataMap[K]
       case 'session_left':
         return this.normalizeSessionLeft(data) as ServerMessageDataMap[K]
+      case 'session_paused':
+        return this.normalizeSessionPaused(data) as ServerMessageDataMap[K]
       case 'member_joined':
       case 'member_left':
         return this.normalizeMemberEvent(data) as ServerMessageDataMap[K]
       case 'member_status_changed':
         return this.normalizeMemberStatusChanged(data) as ServerMessageDataMap[K]
+      case 'presence_cursor':
+        return this.normalizePresenceCursor(data) as ServerMessageDataMap[K]
+      case 'presence_selection':
+        return this.normalizePresenceSelection(data) as ServerMessageDataMap[K]
       case 'graphic_created':
         return this.normalizeGraphicCreated(data) as ServerMessageDataMap[K]
       case 'graphic_updated':
@@ -475,6 +503,16 @@ export class WebSocketClient {
     }
   }
 
+  private normalizeSessionPaused(data: unknown): SessionPausedData {
+    const record = (isObject(data) ? data : {}) as RawSessionPausedData
+    return {
+      sessionKey: toString(record.sessionKey, this.sessionKey),
+      isPaused: record.isPaused === true,
+      operatorUserId: typeof record.operatorUserId === 'number' ? record.operatorUserId : undefined,
+      operatorUsername: typeof record.operatorUsername === 'string' ? record.operatorUsername : undefined,
+    }
+  }
+
   private normalizeMemberEvent(data: unknown) {
     const record = (isObject(data) ? data : {}) as RawMemberEventData
     return {
@@ -493,6 +531,34 @@ export class WebSocketClient {
       username: toString(record.username),
       onlineStatus: toNumber(record.onlineStatus),
       members: toMemberArray(record.members),
+    }
+  }
+
+  private normalizePresenceCursor(data: unknown): PresenceCursorData {
+    const record = (isObject(data) ? data : {}) as RawPresenceCursorData
+    return {
+      sessionKey: toString(record.sessionKey, this.sessionKey),
+      userId: toNumber(record.userId),
+      username: toString(record.username),
+      x: toNumber(record.x),
+      y: toNumber(record.y),
+    }
+  }
+
+  private normalizePresenceSelection(data: unknown): PresenceSelectionData {
+    const record = (isObject(data) ? data : {}) as RawPresenceSelectionData
+    const objectKeys = Array.isArray(record.objectKeys)
+      ? record.objectKeys.map((item) => toString(item)).filter((item) => item.length > 0)
+      : []
+    const objectKey = typeof record.objectKey === 'string' && record.objectKey.length > 0
+      ? record.objectKey
+      : (objectKeys[0] ?? null)
+    return {
+      sessionKey: toString(record.sessionKey, this.sessionKey),
+      userId: toNumber(record.userId),
+      username: toString(record.username),
+      objectKey,
+      objectKeys,
     }
   }
 
@@ -567,27 +633,37 @@ export class WebSocketClient {
 
   private normalizeUndoResult(data: unknown) {
     const record = isObject(data) ? data : {}
+    const operations = Array.isArray(record.operations)
+      ? record.operations.filter((item): item is Record<string, unknown> => isObject(item))
+      : []
     return {
       sessionKey: toString(record.sessionKey, this.sessionKey),
       success: typeof record.success === 'boolean' ? record.success : true,
       operation: isObject(record.operation) ? (record.operation as unknown) : undefined,
+      operations: operations.length > 0 ? (operations as unknown) : undefined,
       operationId: toNumber(record.operationId),
       undoOperationId: toNumber(record.undoOperationId),
       canUndo: !!record.canUndo,
       canRedo: !!record.canRedo,
+      appliedCount: toNumber(record.appliedCount, 1),
     }
   }
 
   private normalizeRedoResult(data: unknown) {
     const record = isObject(data) ? data : {}
+    const operations = Array.isArray(record.operations)
+      ? record.operations.filter((item): item is Record<string, unknown> => isObject(item))
+      : []
     return {
       sessionKey: toString(record.sessionKey, this.sessionKey),
       success: typeof record.success === 'boolean' ? record.success : true,
       operation: isObject(record.operation) ? (record.operation as unknown) : undefined,
+      operations: operations.length > 0 ? (operations as unknown) : undefined,
       operationId: toNumber(record.operationId),
       redoOperationId: toNumber(record.redoOperationId),
       canUndo: !!record.canUndo,
       canRedo: !!record.canRedo,
+      appliedCount: toNumber(record.appliedCount, 1),
     }
   }
 
@@ -612,11 +688,14 @@ export class WebSocketClient {
       width: typeof source.width === 'number' ? source.width : null,
       height: typeof source.height === 'number' ? source.height : null,
       strokeColor: toString(source.strokeColor, '#000000'),
+      lineStyle: source.lineStyle === 'dashed' ? 'dashed' : 'solid',
       fillColor: typeof source.fillColor === 'string' ? source.fillColor : null,
       strokeWidth: toNumber(source.strokeWidth, 1),
       textContent: typeof source.textContent === 'string' ? source.textContent : null,
       fontSize: typeof source.fontSize === 'number' ? source.fontSize : null,
       pathPoints: toPathPoints(source.pathPoints),
+      isLocked: source.isLocked === true || source.isLocked === 1,
+      rotation: toNumber(source.rotation),
       zIndex: toNumber(source.zIndex),
       version: toNumber(source.version),
       creatorId: toNumber(source.creatorId),

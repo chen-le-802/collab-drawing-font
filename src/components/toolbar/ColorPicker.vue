@@ -5,10 +5,14 @@ const props = withDefaults(
   defineProps<{
     modelValue?: string
     allowTransparent?: boolean
+    disabled?: boolean
+    compact?: boolean
   }>(),
   {
     modelValue: '#1f2937',
     allowTransparent: false,
+    disabled: false,
+    compact: false,
   },
 )
 
@@ -39,26 +43,33 @@ watch(
 )
 
 const pickColor = (color: string) => {
+  if (props.disabled) {
+    return
+  }
   emit('update:modelValue', color)
 }
 
 const onCustomColorChange = (event: Event) => {
+  if (props.disabled) {
+    return
+  }
   const input = event.target as HTMLInputElement
   emit('update:modelValue', input.value)
 }
 </script>
 
 <template>
-  <div class="color-picker">
+  <div class="color-picker" :class="{ 'color-picker-compact': compact }">
     <button
       v-if="allowTransparent"
       type="button"
       class="color-item transparent-item"
       :class="{ active: modelValue === 'transparent' }"
+      :disabled="disabled"
       @click="pickColor('transparent')"
       title="透明"
     >
-      /
+      
     </button>
     <button
       v-for="color in presetColors"
@@ -68,10 +79,12 @@ const onCustomColorChange = (event: Event) => {
       :class="{ active: modelValue === color }"
       :style="{ backgroundColor: color }"
       :title="color"
+      :disabled="disabled"
       @click="pickColor(color)"
     />
-    <label class="custom-color">
-      <input type="color" :value="customColor" @input="onCustomColorChange" />
+    <label class="custom-color" title="自定义颜色">
+      <span class="custom-color-icon" aria-hidden="true"></span>
+      <input type="color" :value="customColor" :disabled="disabled" @input="onCustomColorChange" />
     </label>
   </div>
 </template>
@@ -81,6 +94,13 @@ const onCustomColorChange = (event: Event) => {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 6px;
+}
+
+.color-picker-compact {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
 }
 
 .color-item {
@@ -101,13 +121,24 @@ const onCustomColorChange = (event: Event) => {
   box-shadow: 0 0 0 2px var(--cd-primary-light);
 }
 
+.color-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .transparent-item {
-  background: repeating-conic-gradient(#d1d5db 0% 25%, #f3f4f6 0% 50%) 50% / 10px 10px;
-  color: var(--cd-text-primary);
-  font-size: 12px;
+  background: #ffffff;
+  border-color: #cbd5e1;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.color-picker-compact .color-item {
+  width: 22px;
+  height: 22px;
+  border-width: 1px;
 }
 
 .custom-color input {
@@ -118,5 +149,37 @@ const onCustomColorChange = (event: Event) => {
   background: transparent;
   cursor: pointer;
   border-radius: 50%;
+}
+
+.custom-color {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.custom-color-icon {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid #334155;
+  border-radius: 50%;
+  background: conic-gradient(from 25deg, #ef4444, #f59e0b, #22c55e, #3b82f6, #a855f7, #ef4444);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.color-picker-compact .custom-color input {
+  width: 22px;
+  height: 22px;
+}
+
+.color-picker-compact .custom-color-icon {
+  transform: scale(0.86);
+}
+
+.custom-color input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 </style>

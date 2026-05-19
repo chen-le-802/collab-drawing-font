@@ -9,6 +9,8 @@ export type ClientMessageType =
   | 'delete_graphic'
   | 'undo'
   | 'redo'
+  | 'cursor_move'
+  | 'selection_change'
   | 'ping'
 
 export interface BaseClientMessage<T = unknown> {
@@ -32,18 +34,21 @@ export interface CreateGraphicData {
   baseVersion?: number
   lamportTime?: number
   objectKey: string
-  objectType: 'line' | 'rect' | 'circle' | 'text' | 'path'
+  objectType: 'line' | 'rect' | 'circle' | 'text' | 'path' | 'image'
   positionX: number
   positionY: number
   width?: number
   height?: number
   strokeColor: string
+  lineStyle?: 'solid' | 'dashed'
   fillColor?: string
   strokeWidth: number
   zIndex: number
   textContent?: string
   fontSize?: number
   pathPoints?: Array<{ x: number; y: number }>
+  isLocked?: boolean
+  rotation?: number
 }
 
 export interface UpdateGraphicData {
@@ -59,24 +64,30 @@ export interface UpdateGraphicData {
     width?: number
     height?: number
     strokeColor?: string
+    lineStyle?: 'solid' | 'dashed'
     fillColor?: string
     strokeWidth?: number
     zIndex?: number
     textContent?: string
     fontSize?: number
     pathPoints?: Array<{ x: number; y: number }>
+    isLocked?: boolean
+    rotation?: number
   }
   positionX?: number
   positionY?: number
   width?: number
   height?: number
   strokeColor?: string
+  lineStyle?: 'solid' | 'dashed'
   fillColor?: string
   strokeWidth?: number
   zIndex?: number
   textContent?: string
   fontSize?: number
   pathPoints?: Array<{ x: number; y: number }>
+  isLocked?: boolean
+  rotation?: number
 }
 
 export interface DeleteGraphicData {
@@ -94,14 +105,30 @@ export interface UndoRedoData {
   clientId?: string
   baseVersion?: number
   lamportTime?: number
+  times?: number
+}
+
+export interface CursorMoveData {
+  sessionKey: string
+  x: number
+  y: number
+}
+
+export interface SelectionChangeData {
+  sessionKey: string
+  objectKey?: string | null
+  objectKeys?: string[]
 }
 
 export type ServerMessageType =
   | 'session_joined'
   | 'session_left'
+  | 'session_paused'
   | 'member_joined'
   | 'member_left'
   | 'member_status_changed'
+  | 'presence_cursor'
+  | 'presence_selection'
   | 'graphic_created'
   | 'graphic_updated'
   | 'graphic_deleted'
@@ -128,6 +155,13 @@ export interface SessionJoinedData {
 
 export interface SessionLeftData {
   sessionKey: string
+}
+
+export interface SessionPausedData {
+  sessionKey: string
+  isPaused: boolean
+  operatorUserId?: number
+  operatorUsername?: string
 }
 
 export interface MemberJoinedData {
@@ -166,6 +200,22 @@ export interface GraphicDeletedData {
   currentVersion: number
 }
 
+export interface PresenceCursorData {
+  sessionKey: string
+  userId: number
+  username: string
+  x: number
+  y: number
+}
+
+export interface PresenceSelectionData {
+  sessionKey: string
+  userId: number
+  username: string
+  objectKey: string | null
+  objectKeys: string[]
+}
+
 export interface OperationResolvedData {
   operationId: string
   objectKey: string
@@ -194,20 +244,24 @@ export interface UndoResultData {
   sessionKey: string
   success?: boolean
   operation?: OperationVO
+  operations?: OperationVO[]
   operationId: number
   undoOperationId: number
   canUndo: boolean
   canRedo: boolean
+  appliedCount?: number
 }
 
 export interface RedoResultData {
   sessionKey: string
   success?: boolean
   operation?: OperationVO
+  operations?: OperationVO[]
   operationId: number
   redoOperationId: number
   canUndo: boolean
   canRedo: boolean
+  appliedCount?: number
 }
 
 export interface WsErrorData {
@@ -223,9 +277,12 @@ export interface PongData {
 export type ServerMessageDataMap = {
   session_joined: SessionJoinedData
   session_left: SessionLeftData
+  session_paused: SessionPausedData
   member_joined: MemberJoinedData
   member_left: MemberJoinedData
   member_status_changed: MemberStatusChangedData
+  presence_cursor: PresenceCursorData
+  presence_selection: PresenceSelectionData
   graphic_created: GraphicCreatedData
   graphic_updated: GraphicUpdatedData
   graphic_deleted: GraphicDeletedData
@@ -315,4 +372,27 @@ export interface RawMemberEventData {
   username?: string
   members?: unknown
   onlineStatus?: number
+}
+
+export interface RawSessionPausedData {
+  sessionKey?: string
+  isPaused?: boolean
+  operatorUserId?: number
+  operatorUsername?: string
+}
+
+export interface RawPresenceCursorData {
+  sessionKey?: string
+  userId?: number
+  username?: string
+  x?: number
+  y?: number
+}
+
+export interface RawPresenceSelectionData {
+  sessionKey?: string
+  userId?: number
+  username?: string
+  objectKey?: string | null
+  objectKeys?: unknown
 }

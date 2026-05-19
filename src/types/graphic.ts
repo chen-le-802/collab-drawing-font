@@ -1,4 +1,5 @@
-export type GraphicObjectType = 'line' | 'rect' | 'circle' | 'text' | 'path'
+export type GraphicObjectType = 'line' | 'rect' | 'circle' | 'text' | 'path' | 'image'
+export type GraphicLineStyle = 'solid' | 'dashed'
 
 export interface PathPoint {
   x: number
@@ -20,11 +21,14 @@ export interface GraphicVO {
   width: number | null
   height: number | null
   strokeColor: string
+  lineStyle: GraphicLineStyle
   fillColor: string | null
   strokeWidth: number
   textContent: string | null
   fontSize: number | null
   pathPoints: PathPoint[] | null
+  isLocked: boolean
+  rotation: number
   zIndex: number
   version: number
   creatorId: number
@@ -40,12 +44,15 @@ export interface CreateGraphicDTO {
   width?: number
   height?: number
   strokeColor: string
+  lineStyle?: GraphicLineStyle
   fillColor?: string
   strokeWidth: number
   zIndex: number
   textContent?: string
   fontSize?: number
   pathPoints?: PathPoint[]
+  isLocked?: boolean
+  rotation?: number
 }
 
 // 对齐约定：'obj_' + Date.now() + Math.random().toString(36).substr(2, 9)

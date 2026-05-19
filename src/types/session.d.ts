@@ -28,13 +28,18 @@ export interface SessionVO {
   name: string
   thumbnail?: string
   status: SessionStatus
+  isPaused?: boolean
   creatorId: number
   creatorName?: string
   memberCount?: number
   onlineMemberCount?: number
   memberPreviews?: SessionMemberPreviewVO[]
   currentVersion?: number
+  lastOperationAt?: string
+  lastOperationUserId?: number
+  lastOperationUserName?: string
   createdAt: string
+  updatedAt: string
 }
 
 // 会话详情在基础字段上补充成员信息。
@@ -51,6 +56,43 @@ export interface SessionJoinVO {
   currentVersion: number
   // 初次加入会话时返回的全量图形数据。
   graphics: GraphicVO[]
+}
+
+export interface SessionInviteCreateVO {
+  sessionId: number
+  sessionKey: string
+  inviteToken: string
+  role: 0 | 1 | 2
+  maxUses: number | null
+  expiresAt: string
+  invitePath: string
+}
+
+export type SessionInviteStatus = 'active' | 'used' | 'expired' | 'revoked'
+
+export interface SessionInviteItemVO {
+  id: number
+  inviteToken: string
+  role: 0 | 1 | 2
+  status: SessionInviteStatus
+  maxUses: number | null
+  usedCount: number
+  createdBy: number
+  createdAt: string
+  expiresAt?: string
+  invitePath?: string
+}
+
+export interface SessionInviteListVO {
+  sessionId: number
+  sessionKey: string
+  list: SessionInviteItemVO[]
+}
+
+export interface SessionImageUploadVO {
+  sessionId: number
+  sessionKey: string
+  url: string
 }
 
 export interface SessionListVO {
@@ -98,7 +140,7 @@ export interface SessionOperationTimelineQuery {
   fromVersion?: number
   toVersion?: number
   userId?: number
-  operationType?: SessionOperationType
+  operationType?: SessionOperationType | 'restore'
   conflictType?: CollaborationConflictType
   page?: number
   pageSize?: number
@@ -141,8 +183,10 @@ export interface SessionSnapshotItemVO {
   id: number
   sessionId: number
   version: number
+  snapshotName?: string
   graphicCount: number
   createdBy?: number
+  createdByName?: string
   createdAt: string
 }
 
@@ -174,4 +218,16 @@ export interface SessionRestoreVersionVO {
   createdCount: number
   updatedCount: number
   deletedCount: number
+}
+
+export interface SessionPauseVO {
+  sessionId: number
+  sessionKey: string
+  isPaused: boolean
+}
+
+export interface SessionCloseVO {
+  sessionId: number
+  sessionKey: string
+  status: SessionStatus
 }

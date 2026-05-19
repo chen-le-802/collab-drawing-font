@@ -22,9 +22,25 @@ const emit = defineEmits<{
   leave: [session: SessionVO]
 }>()
 
-// 将后端状态值映射为界面标签，避免模板里出现重复判断。
-const statusType = computed(() => (props.session.status === 1 ? 'success' : 'info'))
-const statusText = computed(() => (props.session.status === 1 ? '进行中' : '已结束'))
+// 主状态互斥显示：进行中 / 暂停中 / 已结束。
+const statusType = computed(() => {
+  if (props.session.status !== 1) {
+    return 'info'
+  }
+  if (props.session.isPaused) {
+    return 'warning'
+  }
+  return 'success'
+})
+const statusText = computed(() => {
+  if (props.session.status !== 1) {
+    return '已结束'
+  }
+  if (props.session.isPaused) {
+    return '暂停中'
+  }
+  return '进行中'
+})
 
 // 列表接口优先返回成员头像预览；缺失时回退占位头像。
 const memberCount = computed(() => props.session.memberCount ?? 0)
@@ -271,6 +287,11 @@ const handleLeave = () => emit('leave', props.session)
 .status-info {
   color: #7b8190;
   background: #f0f2f6;
+}
+
+.status-warning {
+  color: #b36b00;
+  background: #fff4dd;
 }
 
 .meta-row {

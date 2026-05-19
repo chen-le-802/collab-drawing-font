@@ -6,5 +6,13 @@
 // biome-ignore lint: disable
 export {}
 declare global {
-
+  const ElButton: typeof import('element-plus/es').ElButton
+  const ElCheckbox: typeof import('element-plus/es').ElCheckbox
+  const ElCollapseTransition: typeof import('element-plus/es').ElCollapseTransition
+  const ElFocusGroupCollection: typeof import('element-plus/es').ElFocusGroupCollection
+  const ElIcon: typeof import('element-plus/es').ElIcon
+  const ElRovingFocusCollectionItem: typeof import('element-plus/es').ElRovingFocusCollectionItem
+  const ElRovingFocusItem: typeof import('element-plus/es').ElRovingFocusItem
+  const ElSelectMenu: typeof import('element-plus/es').ElSelectMenu
+  const ElTreeNode: typeof import('element-plus/es').ElTreeNode
 }

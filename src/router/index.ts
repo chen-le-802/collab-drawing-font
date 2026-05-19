@@ -18,6 +18,12 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/archived-sessions',
+      name: 'archived-sessions',
+      component: () => import('@/views/Home.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/session/:sessionKey',
       name: 'session',
       component: () => import('@/views/DrawCanvas.vue'),
@@ -52,3 +58,4 @@ router.beforeEach((to, _from, next) => {
 })
 
 export default router
+

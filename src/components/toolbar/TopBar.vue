@@ -5,10 +5,15 @@ import {
   Delete,
   Download,
   Files,
+  FullScreen,
+  Grid,
+  Lock,
   MoreFilled,
   Share,
   SwitchButton,
+  Unlock,
   Warning,
+  User
 } from '@element-plus/icons-vue'
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -21,10 +26,20 @@ const props = withDefaults(
     members: MemberVO[]
     userAvatar?: string
     isCreator?: boolean
+    canManageMembers?: boolean
+    canPauseCanvas?: boolean
+    isPaused?: boolean
+    showGrid?: boolean
+    focusMode?: boolean
   }>(),
   {
     userAvatar: '',
     isCreator: false,
+    canManageMembers: false,
+    canPauseCanvas: false,
+    isPaused: false,
+    showGrid: true,
+    focusMode: false,
   },
 )
 
@@ -36,6 +51,12 @@ const emit = defineEmits<{
   showHistory: []
   showConflicts: []
   showVersions: []
+  showGuide: []
+  toggleGrid: []
+  toggleFocusMode: []
+  showMembersManage: []
+  togglePaused: []
+  closeSession: []
   showShortcuts: []
   leave: []
   deleteSession: []
@@ -70,7 +91,13 @@ const handleMoreCommand = (command: string) => {
     history: () => emit('showHistory'),
     conflicts: () => emit('showConflicts'),
     versions: () => emit('showVersions'),
+    showGuide: () => emit('showGuide'),
+    toggleGrid: () => emit('toggleGrid'),
+    toggleFocusMode: () => emit('toggleFocusMode'),
     shortcuts: () => emit('showShortcuts'),
+    membersManage: () => emit('showMembersManage'),
+    togglePaused: () => emit('togglePaused'),
+    closeSession: () => emit('closeSession'),
     leave: () => emit('leave'),
     deleteSession: () => emit('deleteSession'),
   }
@@ -79,7 +106,7 @@ const handleMoreCommand = (command: string) => {
 </script>
 
 <template>
-  <header class="top-bar">
+  <header class="top-bar" data-guide="topbar">
     <div class="left">
       <button class="brand-link" @click="goHome" title="返回首页" aria-label="返回首页">
         <span class="logo" aria-hidden="true"></span>
@@ -101,7 +128,7 @@ const handleMoreCommand = (command: string) => {
     <div class="center">
       <el-popover trigger="hover" placement="bottom" :width="240">
         <template #reference>
-          <div class="avatars">
+          <div class="avatars" data-guide="topbar-members">
             <el-avatar v-for="member in visibleMembers" :key="member.userId" :size="28" :src="member.avatar">
               {{ member.username.slice(0, 1).toUpperCase() }}
             </el-avatar>
@@ -126,17 +153,33 @@ const handleMoreCommand = (command: string) => {
 
       <div class="divider"></div>
 
-      <button class="icon-btn" title="分享" @click="$emit('share')">
+      <button class="icon-btn" title="分享" data-guide="topbar-share" @click="$emit('share')">
         <el-icon><Share /></el-icon>
       </button>
       <button class="icon-btn" title="导出图片" @click="$emit('exportImage')">
         <el-icon><Download /></el-icon>
       </button>
+      <button class="text-icon-btn" :title="showGrid ? '隐藏网格' : '显示网格'" @click="$emit('toggleGrid')">
+        <el-icon><Grid /></el-icon>
+        <span>{{ showGrid ? '隐藏网格' : '显示网格' }}</span>
+      </button>
+      <button class="text-icon-btn" title="快捷键" @click="$emit('showShortcuts')">
+        <span class="toolbar-kbd">K</span>
+        <span>快捷键</span>
+      </button>
+      <!-- <button class="text-icon-btn" title="新手引导" @click="$emit('showGuide')">
+        <span class="toolbar-kbd">?</span>
+        <span>新手引导</span>
+      </button> -->
+      <button class="text-icon-btn" :title="focusMode ? '退出专注模式 (Esc)' : '进入专注模式'" @click="$emit('toggleFocusMode')">
+        <el-icon><FullScreen /></el-icon>
+        <span>{{ focusMode ? '退出专注' : '专注模式' }}</span>
+      </button>
 
       <div class="divider"></div>
 
       <el-dropdown trigger="click" @command="handleMoreCommand">
-        <button class="icon-btn more-btn" title="更多操作">
+        <button class="icon-btn more-btn" title="更多操作" data-guide="topbar-more">
           <el-icon><MoreFilled /></el-icon>
         </button>
         <template #dropdown>
@@ -150,8 +193,20 @@ const handleMoreCommand = (command: string) => {
             <el-dropdown-item command="versions">
               <el-icon class="menu-icon"><Files /></el-icon> 版本快照
             </el-dropdown-item>
-            <el-dropdown-item command="shortcuts" divided>
-              <span class="menu-icon keyboard-icon">K</span> 快捷键
+            <el-dropdown-item v-if="canManageMembers" command="membersManage">
+              <el-icon class="menu-icon"><User /></el-icon>  成员管理
+            </el-dropdown-item>
+            <el-dropdown-item v-if="canPauseCanvas" command="togglePaused">
+              <el-icon class="menu-icon"><Lock v-if="!isPaused" /><Unlock v-else /></el-icon>
+              {{ isPaused ? '恢复画布' : '暂停画布' }}
+            </el-dropdown-item>
+            <el-dropdown-item command="showGuide">
+              <span class="toolbar-kbd menu-icon">?</span>
+              <span>新手引导</span>
+            </el-dropdown-item>
+            <el-dropdown-item v-if="isCreator" command="closeSession" divided>
+              <el-icon class="menu-icon danger"><Warning /></el-icon>
+              <span class="danger">结束会话（不可恢复）</span>
             </el-dropdown-item>
             <el-dropdown-item v-if="isCreator" command="deleteSession" divided>
               <el-icon class="menu-icon danger"><Delete /></el-icon>
@@ -161,6 +216,7 @@ const handleMoreCommand = (command: string) => {
               <el-icon class="menu-icon danger"><SwitchButton /></el-icon>
               <span class="danger">退出会话</span>
             </el-dropdown-item>
+           
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -314,6 +370,39 @@ const handleMoreCommand = (command: string) => {
   border-color: rgba(37, 99, 235, 0.24);
   background: var(--cd-primary-light);
   color: var(--cd-primary);
+}
+
+.text-icon-btn {
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: #f8f9fc;
+  color: var(--cd-text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  font-size: 13px;
+  transition: background var(--cd-transition), color var(--cd-transition), border-color var(--cd-transition);
+}
+
+.text-icon-btn:hover {
+  border-color: rgba(37, 99, 235, 0.24);
+  background: var(--cd-primary-light);
+  color: var(--cd-primary);
+}
+
+.toolbar-kbd {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .menu-icon {

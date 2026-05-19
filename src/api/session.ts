@@ -3,6 +3,9 @@ import { ErrorCode, ErrorMessage } from '@/utils/errors'
 import type { ApiResponse } from '@/types/api'
 import type {
   SessionDetailVO,
+  SessionInviteCreateVO,
+  SessionInviteListVO,
+  SessionImageUploadVO,
   SessionConflictLogsVO,
   SessionJoinVO,
   SessionListVO,
@@ -10,6 +13,8 @@ import type {
   SessionOperationTimelineVO,
   SessionOperationsSyncVO,
   SessionReplayVO,
+  SessionCloseVO,
+  SessionPauseVO,
   SessionRestoreVersionVO,
   SessionSnapshotItemVO,
   SessionSnapshotsVO,
@@ -36,15 +41,25 @@ export interface SessionAPI {
   getOperations(sessionKey: string, sinceVersion?: number): Promise<SessionOperationsSyncVO>
   getOperationTimeline(sessionKey: string, query?: SessionOperationTimelineQuery): Promise<SessionOperationTimelineVO>
   getConflictLogs(sessionKey: string, sinceId?: number, limit?: number): Promise<SessionConflictLogsVO>
-  createSnapshot(sessionKey: string): Promise<SessionSnapshotItemVO>
+  createSnapshot(sessionKey: string, snapshotName?: string): Promise<SessionSnapshotItemVO>
   getSnapshots(sessionKey: string, limit?: number): Promise<SessionSnapshotsVO>
   getReplay(sessionKey: string, targetVersion: number): Promise<SessionReplayVO>
   restoreVersion(sessionKey: string, targetVersion: number): Promise<SessionRestoreVersionVO>
-  join(sessionKey: string): Promise<SessionJoinVO>
+  join(sessionKey: string, inviteToken?: string): Promise<SessionJoinVO>
+  createInvite(
+    sessionKey: string,
+    role: 0 | 1 | 2,
+    options?: { maxUses?: number; expiresInHours?: number },
+  ): Promise<SessionInviteCreateVO>
+  getInviteList(sessionKey: string, includeUsed?: boolean): Promise<SessionInviteListVO>
+  revokeInvite(sessionKey: string, inviteId: number): Promise<void>
+  uploadSessionImage(sessionKey: string, file: File): Promise<SessionImageUploadVO>
   heartbeat(sessionKey: string): Promise<void>
   leave(sessionKey: string): Promise<void>
   removeMember(sessionKey: string, targetUserId: number): Promise<void>
-  transferCreator(sessionKey: string, targetUserId: number): Promise<void>
+  updateMemberRole(sessionKey: string, targetUserId: number, role: 0 | 1 | 2): Promise<void>
+  updatePausedStatus(sessionKey: string, isPaused: boolean): Promise<SessionPauseVO>
+  closeSession(sessionKey: string): Promise<SessionCloseVO>
   deleteSession(sessionKey: string): Promise<void>
 }
 
@@ -159,8 +174,11 @@ export const sessionApi: SessionAPI = {
     )
   },
 
-  async createSnapshot(sessionKey: string): Promise<SessionSnapshotItemVO> {
-    const res = await http.post<ApiResponse<SessionSnapshotItemVO>>(`v1/sessions/${sessionKey}/snapshots`)
+  async createSnapshot(sessionKey: string, snapshotName?: string): Promise<SessionSnapshotItemVO> {
+    const payload = typeof snapshotName === 'string' && snapshotName.trim().length > 0
+      ? { snapshotName: snapshotName.trim() }
+      : undefined
+    const res = await http.post<ApiResponse<SessionSnapshotItemVO>>(`v1/sessions/${sessionKey}/snapshots`, payload)
     if (res.data.code !== ErrorCode.SUCCESS) {
       handleApiError(res.data.code, res.data.message)
     }
@@ -230,9 +248,74 @@ export const sessionApi: SessionAPI = {
     )
   },
 
-  async join(sessionKey: string): Promise<SessionJoinVO> {
+  async createInvite(
+    sessionKey: string,
+    role: 0 | 1 | 2,
+    options?: { maxUses?: number; expiresInHours?: number },
+  ): Promise<SessionInviteCreateVO> {
+    const payload = {
+      role,
+      ...(typeof options?.maxUses === 'number' ? { maxUses: options.maxUses } : {}),
+      ...(typeof options?.expiresInHours === 'number' ? { expiresInHours: options.expiresInHours } : {}),
+    }
+    const res = await http.post<ApiResponse<SessionInviteCreateVO>>(`v1/sessions/${sessionKey}/invites`, payload)
+    if (res.data.code !== ErrorCode.SUCCESS) {
+      handleApiError(res.data.code, res.data.message)
+    }
+    return (
+      res.data.data ?? {
+        sessionId: 0,
+        sessionKey,
+        inviteToken: '',
+        role,
+        maxUses: 1,
+        expiresAt: new Date().toISOString(),
+        invitePath: `/session/${sessionKey}`,
+      }
+    )
+  },
+
+  async getInviteList(sessionKey: string, includeUsed = false): Promise<SessionInviteListVO> {
+    const res = await http.get<ApiResponse<SessionInviteListVO>>(`v1/sessions/${sessionKey}/invites`, {
+      params: { includeUsed: includeUsed ? 1 : 0 },
+    })
+    if (res.data.code !== ErrorCode.SUCCESS) {
+      handleApiError(res.data.code, res.data.message)
+    }
+    return (
+      res.data.data ?? {
+        sessionId: 0,
+        sessionKey,
+        list: [],
+      }
+    )
+  },
+
+  async revokeInvite(sessionKey: string, inviteId: number): Promise<void> {
+    const res = await http.post<ApiResponse<null>>(`v1/sessions/${sessionKey}/invites/${inviteId}/revoke`)
+    if (res.data.code !== ErrorCode.SUCCESS) {
+      handleApiError(res.data.code, res.data.message)
+    }
+  },
+
+  async uploadSessionImage(sessionKey: string, file: File): Promise<SessionImageUploadVO> {
+    const formData = new FormData()
+    formData.append('file', file)
+    const res = await http.post<ApiResponse<SessionImageUploadVO>>(`v1/sessions/${sessionKey}/images`, formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    })
+    if (res.data.code !== ErrorCode.SUCCESS) {
+      handleApiError(res.data.code, res.data.message)
+    }
+    return res.data.data!
+  },
+
+  async join(sessionKey: string, inviteToken?: string): Promise<SessionJoinVO> {
     // 对齐后端：POST /api/v1/sessions/:sessionKey/join
-    const res = await http.post<ApiResponse<SessionJoinVO>>(`v1/sessions/${sessionKey}/join`)
+    const payload = inviteToken ? { inviteToken } : undefined
+    const res = await http.post<ApiResponse<SessionJoinVO>>(`v1/sessions/${sessionKey}/join`, payload)
     if (res.data.code !== ErrorCode.SUCCESS) {
       handleApiError(res.data.code, res.data.message)
     }
@@ -263,11 +346,39 @@ export const sessionApi: SessionAPI = {
     }
   },
 
-  async transferCreator(sessionKey: string, targetUserId: number): Promise<void> {
-    const res = await http.post<ApiResponse<null>>(`v1/sessions/${sessionKey}/transfer/${targetUserId}`)
+  async updateMemberRole(sessionKey: string, targetUserId: number, role: 0 | 1 | 2): Promise<void> {
+    const res = await http.post<ApiResponse<null>>(`v1/sessions/${sessionKey}/members/${targetUserId}/role`, { role })
     if (res.data.code !== ErrorCode.SUCCESS) {
       handleApiError(res.data.code, res.data.message)
     }
+  },
+
+  async updatePausedStatus(sessionKey: string, isPaused: boolean): Promise<SessionPauseVO> {
+    const res = await http.post<ApiResponse<SessionPauseVO>>(`v1/sessions/${sessionKey}/pause`, { isPaused })
+    if (res.data.code !== ErrorCode.SUCCESS) {
+      handleApiError(res.data.code, res.data.message)
+    }
+    return (
+      res.data.data ?? {
+        sessionId: 0,
+        sessionKey,
+        isPaused,
+      }
+    )
+  },
+
+  async closeSession(sessionKey: string): Promise<SessionCloseVO> {
+    const res = await http.post<ApiResponse<SessionCloseVO>>(`v1/sessions/${sessionKey}/close`)
+    if (res.data.code !== ErrorCode.SUCCESS) {
+      handleApiError(res.data.code, res.data.message)
+    }
+    return (
+      res.data.data ?? {
+        sessionId: 0,
+        sessionKey,
+        status: 0,
+      }
+    )
   },
 
   async deleteSession(sessionKey: string): Promise<void> {

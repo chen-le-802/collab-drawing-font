@@ -5,6 +5,7 @@ import {
   CirclePlus,
   Clock,
   Collection,
+  DocumentDelete,
   Grid,
   Search,
   SwitchButton,
@@ -12,6 +13,7 @@ import {
   Tickets,
 } from '@element-plus/icons-vue'
 import SessionCard from '@/components/session/SessionCard.vue'
+import OnboardingGuide from '@/views/DrawCanvas/components/OnboardingGuide.vue'
 import SessionCreate from '@/views/SessionCreate.vue'
 import { graphicApi } from '@/api/graphic'
 import { sessionApi } from '@/api/session'
@@ -19,7 +21,9 @@ import { userApi } from '@/api/user'
 import { useAuthStore } from '@/stores/auth'
 import type { GraphicVO } from '@/types/graphic'
 import type { SessionVO } from '@/types/session'
+import type { GuideStep } from '@/views/DrawCanvas/components/OnboardingGuide.vue'
 import { confirmDanger, feedback } from '@/utils/feedback'
+import { resolveSessionErrorMessage } from '@/utils/sessionError'
 
 const route = useRoute()
 const router = useRouter()
@@ -27,22 +31,91 @@ const authStore = useAuthStore()
 const loading = ref(false)
 const createVisible = ref(false)
 const sessions = ref<SessionVO[]>([])
+const archivedJoinedSessions = ref<SessionVO[]>([])
+const archivedCreatedSessions = ref<SessionVO[]>([])
 const currentUserId = ref<number>()
 const searchKeyword = ref('')
 const sortBy = ref<'created_desc' | 'created_asc' | 'name_asc' | 'name_desc' | 'version_desc'>('created_desc')
 const compactCards = ref(false)
+const sessionFilter = ref<'all' | 'active' | 'paused'>('all')
+const archivedScope = ref<'joined' | 'created'>('joined')
+const homeGuideVisible = ref(false)
+const homeManualVisible = ref(false)
+const HOME_GUIDE_SEEN_KEY = 'home_onboarding_seen_v1'
+const homeGuideSteps: GuideStep[] = [
+  {
+    selector: '[data-guide="home-nav"]',
+    title: '导航区：先选工作视角',
+    content: '这里可以切换“我加入的会话 / 我创建的会话 / 已结束会话”，快速定位目标画布。',
+    placement: 'right',
+  },
+  {
+    selector: '[data-guide="home-create"]',
+    title: '创建会话：从这里开始协作',
+    content: '点击“创建新会话”即可新建画布并邀请成员一起编辑。',
+    placement: 'right',
+  },
+  {
+    selector: '[data-guide="home-summary"]',
+    title: '概览区：快速查看状态',
+    content: '这里展示进行中、暂停中和最近参与会话，方便你快速回到工作上下文。',
+    placement: 'bottom',
+    highlight: false,
+  },
+  {
+    selector: '[data-guide="home-list-tools"]',
+    title: '列表工具：筛选与检索',
+    content: '在这里可以切换视图、搜索会话、排序结果，快速找到你要打开的画布。',
+    placement: 'bottom',
+  },
+  {
+    selector: '[data-guide="home-help"]',
+    title: '完整使用手册：需要时随时查看',
+    content: '点击“帮助中心”可进入新手引导或查看完整手册。建议先看“成员管理、邀请分享、版本快照与恢复”。',
+    placement: 'right',
+  },
+]
 
 const isMyCreatedTab = computed(() => route.path.startsWith('/my-sessions'))
-const listTitle = computed(() => (isMyCreatedTab.value ? '我创建的会话' : '我加入的会话'))
+const isArchivedTab = computed(() => route.path.startsWith('/archived-sessions'))
+const listTitle = computed(() => {
+  if (isArchivedTab.value) {
+    return archivedScope.value === 'created' ? '我创建的已结束会话' : '我加入的已结束会话'
+  }
+  return isMyCreatedTab.value ? '我创建的会话' : '我加入的会话'
+})
 const pageSubtitle = computed(() =>
-  isMyCreatedTab.value ? '管理你发起的协作画布与邀请链接' : '继续最近参与的团队画布',
+  isArchivedTab.value
+    ? archivedScope.value === 'created'
+      ? '仅查看你创建且已结束的会话'
+      : '查看你加入的已结束会话（包含你创建的）'
+    : isMyCreatedTab.value
+      ? '管理你发起的协作画布与邀请链接'
+      : '继续最近参与的团队画布',
 )
 const emptyDescription = computed(() =>
-  isMyCreatedTab.value ? '暂无你创建的会话，点击左侧创建新会话' : '暂无会话，点击左侧创建新会话',
+  isArchivedTab.value
+    ? archivedScope.value === 'created'
+      ? '暂无你创建的已结束会话'
+      : '暂无你加入的已结束会话'
+    : isMyCreatedTab.value
+      ? '暂无你创建的会话，点击左侧创建新会话'
+      : '暂无会话，点击左侧创建新会话',
 )
 const normalizedKeyword = computed(() => searchKeyword.value.trim().toLowerCase())
+const getSessionActivityTime = (session: SessionVO): number => {
+  const candidate = session.lastOperationAt ?? session.updatedAt ?? session.createdAt
+  const time = new Date(candidate).getTime()
+  return Number.isNaN(time) ? 0 : time
+}
 const displayedSessions = computed(() => {
   let list = [...sessions.value]
+  if (!isArchivedTab.value && sessionFilter.value === 'active') {
+    list = list.filter((item) => item.status === 1 && !item.isPaused)
+  }
+  if (!isArchivedTab.value && sessionFilter.value === 'paused') {
+    list = list.filter((item) => item.isPaused)
+  }
   if (normalizedKeyword.value) {
     list = list.filter((item) => {
       const fields = [item.name, item.creatorName ?? '', item.sessionKey]
@@ -70,6 +143,18 @@ const displayedSessions = computed(() => {
   return list
 })
 const emptyDisplayText = computed(() => {
+  if (isArchivedTab.value) {
+    if (!normalizedKeyword.value) {
+      return emptyDescription.value
+    }
+    return '没有匹配的会话，试试其他关键词'
+  }
+  if (sessionFilter.value === 'active') {
+    return '当前没有进行中的会话'
+  }
+  if (sessionFilter.value === 'paused') {
+    return '当前没有暂停中的会话'
+  }
   if (!normalizedKeyword.value) {
     return emptyDescription.value
   }
@@ -98,14 +183,39 @@ const visibleOnlineMemberIds = computed(() => {
 })
 const visibleMemberCount = computed(() => visibleMemberIds.value.size)
 const visibleOnlineMemberCount = computed(() => visibleOnlineMemberIds.value.size)
-const activeSessions = computed(() => sessions.value.filter((item) => item.status === 1).length)
+const activeSessions = computed(() => sessions.value.filter((item) => item.status === 1 && !item.isPaused).length)
+const pausedSessions = computed(() => sessions.value.filter((item) => item.isPaused))
 const latestSession = computed(() => {
   if (sessions.value.length === 0) {
     return null
   }
   return [...sessions.value].sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    (a, b) => getSessionActivityTime(b) - getSessionActivityTime(a),
   )[0] ?? null
+})
+const latestSessionStatusText = computed(() => {
+  if (!latestSession.value) {
+    return ''
+  }
+  if (latestSession.value.status !== 1) {
+    return '已结束'
+  }
+  if (latestSession.value.isPaused) {
+    return '暂停中'
+  }
+  return '进行中'
+})
+const latestSessionStatusClass = computed(() => {
+  if (!latestSession.value) {
+    return ''
+  }
+  if (latestSession.value.status !== 1) {
+    return 'is-info'
+  }
+  if (latestSession.value.isPaused) {
+    return 'is-warning'
+  }
+  return 'is-success'
 })
 const summaryCards = computed(() => [
   {
@@ -113,20 +223,26 @@ const summaryCards = computed(() => [
     value: sessions.value.length,
     hint: isMyCreatedTab.value ? '由你创建' : '已加入',
     tone: 'coral',
+    key: 'all',
   },
   {
-    label: '活跃画布',
+    label: '进行中画布',
     value: activeSessions.value,
-    hint: '可继续协作',
+    hint: '点击筛选进行中的会话',
     tone: 'mint',
+    key: 'active',
   },
   {
-    label: '在线成员',
-    value: visibleOnlineMemberCount.value,
-    hint: `已识别成员 ${visibleMemberCount.value}`,
+    label: '暂停中画布',
+    value: pausedSessions.value.length,
+    hint: '点击筛选暂停中的会话',
     tone: 'sky',
+    key: 'paused',
   },
 ])
+const showSummaryCards = computed(() => !isArchivedTab.value)
+const archivedJoinedTotal = computed(() => archivedJoinedSessions.value.length)
+const archivedCreatedTotal = computed(() => archivedCreatedSessions.value.length)
 const THUMBNAIL_WIDTH = 320
 const THUMBNAIL_HEIGHT = 180
 const THUMBNAIL_PADDING = 18
@@ -145,6 +261,9 @@ const normalizeRect = (x: number, y: number, width: number, height: number) => {
 }
 
 const getGraphicBounds = (graphic: GraphicVO) => {
+  if (graphic.objectType === 'image') {
+    return normalizeRect(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0)
+  }
   if (graphic.objectType === 'path') {
     const points = graphic.pathPoints ?? []
     if (points.length === 0) {
@@ -211,13 +330,22 @@ const isClosedPath = (points: Array<{ x: number; y: number }>) => {
 
 const drawGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   switch (graphic.objectType) {
+    case 'image': {
+      const width = Math.max(1, Math.abs(graphic.width ?? 0))
+      const height = Math.max(1, Math.abs(graphic.height ?? 0))
+      ctx.fillStyle = '#e5e7eb'
+      ctx.fillRect(graphic.positionX, graphic.positionY, width, height)
+      break
+    }
     case 'line': {
       ctx.beginPath()
       ctx.moveTo(graphic.positionX, graphic.positionY)
       ctx.lineTo(graphic.positionX + (graphic.width ?? 0), graphic.positionY + (graphic.height ?? 0))
       ctx.strokeStyle = graphic.strokeColor
       ctx.lineWidth = graphic.strokeWidth
+      ctx.setLineDash(graphic.lineStyle === 'dashed' ? [10, 6] : [])
       ctx.stroke()
+      ctx.setLineDash([])
       break
     }
     case 'rect': {
@@ -229,7 +357,9 @@ const drawGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
       }
       ctx.strokeStyle = graphic.strokeColor
       ctx.lineWidth = graphic.strokeWidth
+      ctx.setLineDash(graphic.lineStyle === 'dashed' ? [10, 6] : [])
       ctx.strokeRect(graphic.positionX, graphic.positionY, width, height)
+      ctx.setLineDash([])
       break
     }
     case 'circle': {
@@ -243,7 +373,9 @@ const drawGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
       }
       ctx.strokeStyle = graphic.strokeColor
       ctx.lineWidth = graphic.strokeWidth
+      ctx.setLineDash(graphic.lineStyle === 'dashed' ? [10, 6] : [])
       ctx.stroke()
+      ctx.setLineDash([])
       break
     }
     case 'text': {
@@ -282,7 +414,9 @@ const drawGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
       ctx.lineWidth = graphic.strokeWidth
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
+      ctx.setLineDash(graphic.lineStyle === 'dashed' ? [10, 6] : [])
       ctx.stroke()
+      ctx.setLineDash([])
       break
     }
     default:
@@ -374,6 +508,25 @@ const fetchSessions = async () => {
     // 先同步用户信息，保证卡片按钮权限（删除/退出）在首屏渲染时就是正确状态。
     const userId = await ensureCurrentUserId()
 
+    if (isArchivedTab.value) {
+      if (!userId) {
+        sessions.value = []
+        archivedJoinedSessions.value = []
+        archivedCreatedSessions.value = []
+        feedback.error('获取用户信息失败，无法加载已结束会话')
+        return
+      }
+      const [joinedRes, createdRes] = await Promise.all([
+        sessionApi.list(1, 30, 0),
+        sessionApi.list(1, 30, 0, userId),
+      ])
+      archivedJoinedSessions.value = joinedRes.list
+      archivedCreatedSessions.value = createdRes.list
+      sessions.value = archivedScope.value === 'created' ? createdRes.list : joinedRes.list
+      void loadSessionThumbnails(sessions.value)
+      return
+    }
+
     // 首页：展示我加入的会话；我的会话：展示我创建的会话。
     if (!isMyCreatedTab.value) {
       const res = await sessionApi.list(1, 30)
@@ -401,9 +554,60 @@ const fetchSessions = async () => {
 const openCreateDialog = () => {
   createVisible.value = true
 }
-
+const openLatestSession = () => {
+  if (!latestSession.value) {
+    return
+  }
+  router.push(`/session/${latestSession.value.sessionKey}`)
+}
+const handleSummaryCardClick = (filter: 'all' | 'active' | 'paused') => {
+  if (isArchivedTab.value) {
+    return
+  }
+  sessionFilter.value = filter
+}
+const handleArchivedScopeChange = async (scope: 'joined' | 'created') => {
+  if (archivedScope.value === scope) {
+    return
+  }
+  archivedScope.value = scope
+  sessionFilter.value = 'all'
+  sessions.value = scope === 'created' ? archivedCreatedSessions.value : archivedJoinedSessions.value
+  if (sessions.value.length === 0) {
+    await fetchSessions()
+    return
+  }
+  void loadSessionThumbnails(sessions.value)
+}
 const toggleCompactCards = () => {
   compactCards.value = !compactCards.value
+}
+
+const maybeOpenHomeGuide = () => {
+  const seen = localStorage.getItem(HOME_GUIDE_SEEN_KEY) === '1'
+  if (!seen) {
+    homeGuideVisible.value = true
+  }
+}
+
+const handleOpenHomeGuide = () => {
+  homeGuideVisible.value = true
+}
+
+const handleOpenHomeManual = () => {
+  homeManualVisible.value = true
+}
+
+const handleHomeHelpCommand = (command: 'guide' | 'manual') => {
+  if (command === 'guide') {
+    handleOpenHomeGuide()
+    return
+  }
+  handleOpenHomeManual()
+}
+
+const handleHomeGuideFinished = () => {
+  localStorage.setItem(HOME_GUIDE_SEEN_KEY, '1')
 }
 
 const handleOpenSession = (session: SessionVO) => {
@@ -436,6 +640,8 @@ const handleDeleteSession = async (_session: SessionVO) => {
     }
     await sessionApi.deleteSession(_session.sessionKey)
     sessions.value = sessions.value.filter((item) => item.sessionKey !== _session.sessionKey)
+    archivedJoinedSessions.value = archivedJoinedSessions.value.filter((item) => item.sessionKey !== _session.sessionKey)
+    archivedCreatedSessions.value = archivedCreatedSessions.value.filter((item) => item.sessionKey !== _session.sessionKey)
     feedback.success('会话已删除')
   } catch (error) {
     feedback.errorFrom(error, '删除会话失败')
@@ -456,6 +662,7 @@ const handleLeaveSession = async (session: SessionVO) => {
     }
     await sessionApi.leave(session.sessionKey)
     sessions.value = sessions.value.filter((item) => item.sessionKey !== session.sessionKey)
+    archivedJoinedSessions.value = archivedJoinedSessions.value.filter((item) => item.sessionKey !== session.sessionKey)
     feedback.success('已退出会话，可通过邀请链接再次加入')
   } catch (error) {
     feedback.errorFrom(error, '退出会话失败')
@@ -463,6 +670,12 @@ const handleLeaveSession = async (session: SessionVO) => {
 }
 
 const handleLogout = async () => {
+  const confirmed = await confirmDanger('确认退出登录吗？', '退出登录确认', {
+    confirmButtonText: '确认退出',
+  })
+  if (!confirmed) {
+    return
+  }
   try {
     await userApi.logout()
   } catch {
@@ -486,11 +699,12 @@ const tryAutoJoinFromRoute = async (): Promise<boolean> => {
 
   try {
     // 邀请链接自动加入：后端 join 为幂等，已在成员表时也会直接成功返回。
-    await sessionApi.join(sessionKey)
+    const inviteToken = typeof route.query.inviteToken === 'string' ? route.query.inviteToken.trim() : undefined
+    await sessionApi.join(sessionKey, inviteToken || undefined)
     await router.replace(`/session/${sessionKey}`)
     return true
   } catch (error) {
-    feedback.errorFrom(error, '加入会话失败')
+    feedback.error(resolveSessionErrorMessage(error, '加入会话失败'))
     return false
   }
 }
@@ -502,11 +716,14 @@ onMounted(async () => {
     return
   }
   await fetchSessions()
+  maybeOpenHomeGuide()
 })
 
 watch(
   () => route.path,
   async () => {
+    sessionFilter.value = 'all'
+    archivedScope.value = 'joined'
     await fetchSessions()
   },
 )
@@ -521,56 +738,108 @@ watch(
           <span class="logo-text">画协</span>
         </div>
 
-        <nav class="sidebar-nav">
-          <router-link to="/" class="nav-item" :class="{ active: !isMyCreatedTab }">
+        <nav class="sidebar-nav" data-guide="home-nav">
+          <router-link to="/" class="nav-item" :class="{ active: !isMyCreatedTab && !isArchivedTab }">
             <el-icon class="nav-icon"><Collection /></el-icon>
             <span>我加入的会话</span>
           </router-link>
-          <router-link to="/my-sessions" class="nav-item" :class="{ active: isMyCreatedTab }">
+          <router-link to="/my-sessions" class="nav-item" :class="{ active: isMyCreatedTab && !isArchivedTab }">
             <el-icon class="nav-icon"><UserFilled /></el-icon>
             <span>我创建的会话</span>
           </router-link>
+          <router-link to="/archived-sessions" class="nav-item" :class="{ active: isArchivedTab }">
+            <el-icon class="nav-icon"><DocumentDelete /></el-icon>
+            <span>已结束的会话</span>
+          </router-link>
         </nav>
 
-        <button class="create-btn" @click="openCreateDialog">
+        <button class="create-btn" data-guide="home-create" @click="openCreateDialog">
           <el-icon><CirclePlus /></el-icon>
           创建新会话
         </button>
       </div>
 
       <div class="sidebar-bottom">
-        <div class="user-info" @click="$router.push('/profile')">
-          <el-avatar :size="36" :src="authStore.user?.avatar" class="user-avatar">
-            {{ (authStore.user?.username ?? 'U').slice(0, 1).toUpperCase() }}
-          </el-avatar>
-          <div class="user-meta">
-            <div class="user-name">{{ authStore.user?.username ?? '用户' }}</div>
-            <div class="user-role">个人中心</div>
-          </div>
+        <div class="help-row help-row-bottom" data-guide="home-help">
+          <el-dropdown trigger="click" @command="handleHomeHelpCommand">
+            <button class="help-entry" type="button" title="帮助中心">
+              <span class="help-dot">?</span>
+              <span>帮助中心</span>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="guide">新手引导</el-dropdown-item>
+                <el-dropdown-item command="manual">使用手册</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
-        <button class="logout-btn" @click="handleLogout" title="退出登录">
-          <el-icon><SwitchButton /></el-icon>
-        </button>
+        <div class="account-row">
+          <div class="user-info" @click="$router.push('/profile')">
+            <el-avatar :size="36" :src="authStore.user?.avatar" class="user-avatar">
+              {{ (authStore.user?.username ?? 'U').slice(0, 1).toUpperCase() }}
+            </el-avatar>
+            <div class="user-meta">
+              <div class="user-name">{{ authStore.user?.username ?? '用户' }}</div>
+              <div class="user-role">个人中心</div>
+            </div>
+          </div>
+          <button class="logout-btn" @click="handleLogout" title="退出登录">
+            <el-icon><SwitchButton /></el-icon>
+          </button>
+        </div>
       </div>
     </aside>
 
     <main class="main-content">
-      <section class="overview-panel">
-        <div class="overview-copy">
+      <section class="overview-panel" data-guide="home-summary" :class="{ 'overview-panel-archived': isArchivedTab }">
+        <div
+          class="overview-copy"
+          :class="{
+            'overview-copy-clickable': !!latestSession && !isArchivedTab,
+          }"
+          @click="!isArchivedTab && openLatestSession()"
+        >
           <div class="eyebrow">Workspace</div>
           <h1 class="main-title">{{ listTitle }}</h1>
           <p class="main-subtitle">{{ pageSubtitle }}</p>
-          <div v-if="latestSession" class="latest-session">
+          <div v-if="latestSession && !isArchivedTab" class="latest-session">
             <el-icon><Clock /></el-icon>
-            <span>最近创建：{{ latestSession.name }}</span>
+            <span>最近参与：{{ latestSession.name }}</span>
+            <span class="latest-status-pill" :class="latestSessionStatusClass">{{ latestSessionStatusText }}</span>
           </div>
         </div>
-        <div class="summary-grid">
+        <div v-if="isArchivedTab" class="summary-grid">
+          <div
+            class="summary-card summary-mint"
+            role="button"
+            tabindex="0"
+            @click="handleArchivedScopeChange('joined')"
+          >
+            <div class="summary-label">我加入的</div>
+            <div class="summary-value">{{ archivedJoinedTotal }}</div>
+            <div class="summary-hint">已结束会话（包含我创建的）</div>
+          </div>
+          <div
+            class="summary-card summary-coral"
+            role="button"
+            tabindex="0"
+            @click="handleArchivedScopeChange('created')"
+          >
+            <div class="summary-label">我创建的</div>
+            <div class="summary-value">{{ archivedCreatedTotal }}</div>
+            <div class="summary-hint">仅我创建且已结束</div>
+          </div>
+        </div>
+        <div v-else class="summary-grid">
           <div
             v-for="card in summaryCards"
             :key="card.label"
             class="summary-card"
             :class="`summary-${card.tone}`"
+            role="button"
+            tabindex="0"
+            @click="handleSummaryCardClick(card.key as 'all' | 'active' | 'paused')"
           >
             <div class="summary-label">{{ card.label }}</div>
             <div class="summary-value">{{ card.value }}</div>
@@ -585,7 +854,7 @@ watch(
             <h2 class="list-title">画布列表</h2>
             <p class="list-subtitle">{{ displayedSessions.length }} 个结果</p>
           </div>
-          <div class="main-tools">
+          <div class="main-tools" data-guide="home-list-tools">
             <button
               class="view-toggle"
               type="button"
@@ -646,6 +915,52 @@ watch(
     </main>
 
     <session-create v-model="createVisible" @created="handleSessionCreated" />
+    <OnboardingGuide
+      v-model:visible="homeGuideVisible"
+      :steps="homeGuideSteps"
+      @finished="handleHomeGuideFinished"
+    />
+    <el-dialog
+      v-model="homeManualVisible"
+      title="协同白板使用手册"
+      width="680px"
+      top="5vh"
+      class="home-manual-dialog"
+      destroy-on-close
+      append-to-body
+    >
+      <div class="manual-block">
+        <h4>一、快速开始（新用户建议先看）</h4>
+        <p>1）在首页点击“创建新会话”。2）输入会话名称并确认创建。3）进入画板后先使用“矩形 + 文字”完成第一张草图。</p>
+
+        <h4>二、如何邀请成员加入协作</h4>
+        <p>点击画板顶部“分享”按钮，可生成邀请链接或二维码。将链接发送给成员后，对方即可进入同一画布实时协作。</p>
+
+        <h4>三、成员管理与权限说明</h4>
+        <p>在“更多操作 &gt; 成员管理”中可查看成员列表、在线状态，并执行角色调整与成员移除。建议仅为核心协作者分配较高权限。</p>
+
+        <h4>四、绘图与编辑操作</h4>
+        <p>左侧工具栏支持选择、图形、文字、画笔。支持多选后批量修改描边、填充、线宽和线型；支持拖动画布、缩放视图与网格辅助。</p>
+
+        <h4>五、常用协作能力</h4>
+        <p>1）操作历史：用于回看编辑记录。2）冲突日志：用于排查多人同时编辑冲突。3）版本快照：用于保存关键里程碑。</p>
+
+        <h4>六、版本快照与恢复（重点）</h4>
+        <p>恢复版本会覆盖当前画布状态。建议流程：先“创建快照（可命名）”，再执行恢复；恢复后建议立刻检查关键区域是否符合预期。</p>
+
+        <h4>七、导出与展示建议</h4>
+        <p>PNG 适合汇报截图，SVG 适合后续二次编辑，PDF 适合归档与打印。正式提交前建议分别导出 1 份并做打开验证。</p>
+
+        <h4>八、效率功能与快捷键</h4>
+        <p>支持撤销/重做、快捷键帮助、专注模式、网格开关。建议在演示时开启专注模式，减少视觉干扰并提升讲解连贯性。</p>
+
+        <h4>九、常见问题排查</h4>
+        <p>如果“看不到最新协作内容”，先检查网络与重连提示；如果“恢复后结果不对”，先回看快照版本与操作历史；如需定位问题可先看冲突日志。</p>
+      </div>
+      <template #footer>
+        <el-button @click="homeManualVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -760,12 +1075,94 @@ watch(
   transform: translateY(-1px);
 }
 
+.help-row {
+  display: flex;
+  justify-content: center;
+  margin-top: 2px;
+}
+
+.help-entry {
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--cd-text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-radius: 8px;
+  transition: color var(--cd-transition), background var(--cd-transition);
+}
+
+.help-entry:hover {
+  color: var(--cd-primary);
+  background: rgba(79, 110, 247, 0.08);
+}
+
+.help-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.manual-block h4 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  color: var(--cd-text-primary);
+}
+
+.manual-block p {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--cd-text-secondary);
+}
+
+.manual-block p:last-child {
+  margin-bottom: 0;
+}
+
+:deep(.el-dialog__body) .manual-block {
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+/* 手册弹窗在桌面端上移并右偏，减少遮挡左侧导航和标题区域 */
+:deep(.home-manual-dialog) {
+  margin-left: clamp(320px, 36vw, 520px);
+  margin-right: 24px;
+}
+
 .sidebar-bottom {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  padding: 12px 8px;
+  border-top: 1px solid var(--cd-border);
+}
+
+.help-row-bottom {
+  justify-content: flex-start;
+  padding: 0 4px;
+}
+
+.account-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 8px;
-  border-top: 1px solid var(--cd-border);
 }
 
 .user-info {
@@ -873,6 +1270,17 @@ watch(
   box-shadow: var(--cd-shadow-card);
 }
 
+.overview-copy-clickable {
+  cursor: pointer;
+  transition: transform var(--cd-transition), box-shadow var(--cd-transition), border-color var(--cd-transition);
+}
+
+.overview-copy-clickable:hover {
+  transform: translateY(-2px);
+  /* border-color: rgba(79, 110, 247, 0.28); */
+  box-shadow: 0 18px 30px rgba(20, 30, 55, 0.12);
+}
+
 .eyebrow {
   margin-bottom: 12px;
   color: var(--cd-text-muted);
@@ -909,6 +1317,32 @@ watch(
   box-shadow: 0 8px 18px rgba(20, 30, 55, 0.05);
 }
 
+.latest-status-pill {
+  margin-left: 2px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f0f2f6;
+  color: #7b8190;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.latest-status-pill.is-success {
+  background: #e7f8f4;
+  color: #16806d;
+}
+
+.latest-status-pill.is-info {
+  background: #f0f2f6;
+  color: #7b8190;
+}
+
+.latest-status-pill.is-warning {
+  background: #fff4dd;
+  color: #b36b00;
+}
+
 .latest-session span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -921,6 +1355,11 @@ watch(
   gap: 12px;
 }
 
+.overview-panel-archived .summary-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+
 .summary-card {
   min-height: 180px;
   padding: 20px;
@@ -930,6 +1369,8 @@ watch(
   color: #202331;
   overflow: hidden;
   position: relative;
+  cursor: pointer;
+  transition: transform var(--cd-transition), box-shadow var(--cd-transition);
 }
 
 .summary-card::after {
@@ -950,6 +1391,12 @@ watch(
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.08));
   pointer-events: none;
 }
+
+.summary-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 18px 36px rgba(20, 30, 55, 0.1);
+}
+
 
 .summary-coral {
   background:
@@ -1197,6 +1644,11 @@ watch(
 }
 
 @media (max-width: 900px) {
+  :deep(.home-manual-dialog) {
+    margin-left: auto;
+    margin-right: auto;
+  }
+
   .home-page {
     height: 100vh;
     flex-direction: column;
@@ -1226,6 +1678,13 @@ watch(
   .sidebar-bottom {
     border-top: none;
     padding: 0;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+  }
+
+  .account-row {
+    gap: 6px;
   }
 
   .user-meta {

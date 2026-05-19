@@ -43,6 +43,7 @@ const toGraphicFromOperationData = (payload: Record<string, unknown>): Omit<Part
     width: toNullableNumber(payload.width),
     height: toNullableNumber(payload.height),
     strokeColor: toString(payload.strokeColor, '#000000'),
+    lineStyle: payload.lineStyle === 'dashed' ? 'dashed' : 'solid',
     fillColor: toNullableString(payload.fillColor),
     strokeWidth: toNumber(payload.strokeWidth, 1),
     zIndex: toNumber(payload.zIndex),
@@ -53,6 +54,8 @@ const toGraphicFromOperationData = (payload: Record<string, unknown>): Omit<Part
           .filter((item): item is Record<string, unknown> => isObject(item))
           .map((item) => ({ x: toNumber(item.x), y: toNumber(item.y) }))
       : null,
+    isLocked: payload.isLocked === true || payload.isLocked === 1,
+    rotation: toNumber(payload.rotation),
     version: toNumber(payload.version),
     sessionId: toNumber(payload.sessionId),
     creatorId: toNumber(payload.creatorId),
@@ -116,11 +119,14 @@ export const useCanvasStore = defineStore('canvas', () => {
         width: typeof patch.width === 'number' ? patch.width : null,
         height: typeof patch.height === 'number' ? patch.height : null,
         strokeColor: patch.strokeColor ?? '#000000',
+        lineStyle: patch.lineStyle ?? 'solid',
         fillColor: typeof patch.fillColor === 'string' ? patch.fillColor : null,
         strokeWidth: patch.strokeWidth ?? 1,
         textContent: typeof patch.textContent === 'string' ? patch.textContent : null,
         fontSize: typeof patch.fontSize === 'number' ? patch.fontSize : null,
         pathPoints: Array.isArray(patch.pathPoints) ? patch.pathPoints : null,
+        isLocked: patch.isLocked === true,
+        rotation: toNumber(patch.rotation),
         zIndex: patch.zIndex ?? 0,
         version: patch.version ?? 0,
         creatorId: patch.creatorId ?? operation.userId,
@@ -151,11 +157,14 @@ export const useCanvasStore = defineStore('canvas', () => {
         width: typeof patch.width === 'number' ? patch.width : previous.width,
         height: typeof patch.height === 'number' ? patch.height : previous.height,
         strokeColor: patch.strokeColor ?? previous.strokeColor,
+        lineStyle: patch.lineStyle ?? previous.lineStyle,
         fillColor: typeof patch.fillColor === 'string' ? patch.fillColor : previous.fillColor,
         strokeWidth: patch.strokeWidth ?? previous.strokeWidth,
         textContent: typeof patch.textContent === 'string' ? patch.textContent : previous.textContent,
         fontSize: typeof patch.fontSize === 'number' ? patch.fontSize : previous.fontSize,
         pathPoints: Array.isArray(patch.pathPoints) ? patch.pathPoints : previous.pathPoints,
+        isLocked: typeof patch.isLocked === 'boolean' ? patch.isLocked : previous.isLocked,
+        rotation: typeof patch.rotation === 'number' ? patch.rotation : previous.rotation,
         zIndex: patch.zIndex ?? previous.zIndex,
         version: patch.version ?? previous.version,
         creatorId: patch.creatorId ?? previous.creatorId,
@@ -187,14 +196,20 @@ export const useCanvasStore = defineStore('canvas', () => {
     if (!success) {
       return
     }
-    if (data.operation) {
-      applyOperation(data.operation)
-      redoStack.value = [...redoStack.value, data.operation]
+    const operations = Array.isArray(data.operations) && data.operations.length > 0
+      ? data.operations
+      : (data.operation ? [data.operation] : [])
+    if (operations.length > 0) {
+      operations.forEach((operation) => {
+        applyOperation(operation)
+      })
+      redoStack.value = [...redoStack.value, ...operations]
     }
     if (!data.canUndo) {
       undoStack.value = []
     } else if (undoStack.value.length > 0) {
-      undoStack.value = undoStack.value.slice(0, -1)
+      const popCount = Math.max(1, operations.length || 1)
+      undoStack.value = undoStack.value.slice(0, Math.max(0, undoStack.value.length - popCount))
     }
     if (!data.canRedo && redoStack.value.length > 0) {
       redoStack.value = []
@@ -206,14 +221,20 @@ export const useCanvasStore = defineStore('canvas', () => {
     if (!success) {
       return
     }
-    if (data.operation) {
-      applyOperation(data.operation)
-      undoStack.value = [...undoStack.value, data.operation]
+    const operations = Array.isArray(data.operations) && data.operations.length > 0
+      ? data.operations
+      : (data.operation ? [data.operation] : [])
+    if (operations.length > 0) {
+      operations.forEach((operation) => {
+        applyOperation(operation)
+      })
+      undoStack.value = [...undoStack.value, ...operations]
     }
     if (!data.canRedo && redoStack.value.length > 0) {
       redoStack.value = []
     } else if (redoStack.value.length > 0) {
-      redoStack.value = redoStack.value.slice(0, -1)
+      const popCount = Math.max(1, operations.length || 1)
+      redoStack.value = redoStack.value.slice(0, Math.max(0, redoStack.value.length - popCount))
     }
     if (!data.canUndo) {
       undoStack.value = []

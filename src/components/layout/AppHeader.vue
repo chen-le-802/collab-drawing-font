@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { userApi } from '@/api/user'
+import { confirmDanger } from '@/utils/feedback'
 
 const route = useRoute()
 const router = useRouter()
@@ -40,6 +41,12 @@ const handleCommand = async (command: string) => {
   }
 
   if (command === 'logout') {
+    const confirmed = await confirmDanger('确认退出登录吗？', '退出登录确认', {
+      confirmButtonText: '确认退出',
+    })
+    if (!confirmed) {
+      return
+    }
     try {
       await userApi.logout()
     } catch {

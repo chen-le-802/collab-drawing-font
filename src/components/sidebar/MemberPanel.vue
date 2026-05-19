@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Delete, Fold, MoreFilled, Promotion } from '@element-plus/icons-vue'
+import { Fold, MoreFilled } from '@element-plus/icons-vue'
 
 import type { MemberVO } from '@/types/session'
 
@@ -8,30 +8,18 @@ const props = withDefaults(
   defineProps<{
     members: MemberVO[]
     collapsed: boolean
-    includeHistory?: boolean
     loading?: boolean
-    isCreator?: boolean
-    currentUserId?: number | null
   }>(),
   {
-    includeHistory: false,
     loading: false,
-    isCreator: false,
-    currentUserId: null,
   },
 )
 
 const emit = defineEmits<{
   toggleCollapse: []
-  'update:includeHistory': [value: boolean]
-  removeMember: [member: MemberVO]
-  transferCreator: [member: MemberVO]
 }>()
 
 const visibleMembers = computed(() => {
-  if (props.includeHistory) {
-    return props.members
-  }
   return props.members.filter((member) => (member.membershipStatus ?? 'active') === 'active')
 })
 
@@ -57,35 +45,38 @@ const statusClass = (member: MemberVO) => {
   return member.onlineStatus === 1 ? 'dot-online' : 'dot-offline'
 }
 
-const canRemove = (member: MemberVO) => {
-  const status = member.membershipStatus ?? 'active'
-  if (!props.isCreator) {
-    return false
+const roleText = (role: number) => {
+  if (role === 3) {
+    return 'owner'
   }
-  if (member.role === 2) {
-    return false
+  if (role === 2) {
+    return 'manager'
   }
-  if (props.currentUserId && member.userId === props.currentUserId) {
-    return false
+  if (role === 1) {
+    return 'editor'
   }
-  return status === 'active'
+  return 'viewer'
 }
 
-const canTransferCreator = (member: MemberVO) => {
-  const status = member.membershipStatus ?? 'active'
-  if (!props.isCreator) {
-    return false
+const roleTagClass = (role: number) => {
+  if (role === 3) {
+    return 'role-tag-owner'
   }
-  if (status !== 'active') {
-    return false
+  if (role === 2) {
+    return 'role-tag-manager'
   }
-  if (member.role === 2) {
-    return false
+  if (role === 1) {
+    return 'role-tag-editor'
   }
-  if (props.currentUserId && member.userId === props.currentUserId) {
-    return false
+  return ''
+}
+
+const displayName = (member: MemberVO) => {
+  const normalized = member.username?.trim()
+  if (normalized) {
+    return normalized
   }
-  return true
+  return `用户${member.userId}`
 }
 </script>
 
@@ -94,15 +85,6 @@ const canTransferCreator = (member: MemberVO) => {
     <div class="panel-header">
       <div class="title-wrap" v-if="!collapsed">
         <h3 class="title">在线成员</h3>
-        <el-switch
-          class="history-switch"
-          :model-value="includeHistory"
-          size="small"
-          inline-prompt
-          active-text="历史"
-          inactive-text="当前"
-          @update:model-value="$emit('update:includeHistory', $event)"
-        />
       </div>
       <el-button class="collapse-btn" text @click="$emit('toggleCollapse')" :title="collapsed ? '展开成员面板' : '收起成员面板'">
         <el-icon>
@@ -117,36 +99,17 @@ const canTransferCreator = (member: MemberVO) => {
         <div v-if="visibleMembers.length === 0" class="empty">暂无成员</div>
         <div v-for="member in visibleMembers" :key="member.userId" class="member-item">
           <el-avatar :size="30" :src="member.avatar">
-            {{ member.username.slice(0, 1).toUpperCase() }}
+            {{ displayName(member).slice(0, 1).toUpperCase() }}
           </el-avatar>
           <div class="meta">
-            <div class="name">{{ member.username }}</div>
+            <div class="name-row">
+              <div class="name" :title="displayName(member)">{{ displayName(member) }}</div>
+              <div class="role-tag" :class="roleTagClass(member.role)">{{ roleText(member.role) }}</div>
+            </div>
             <div class="status">
               <span class="dot" :class="statusClass(member)"></span>
               <span>{{ statusText(member) }}</span>
             </div>
-          </div>
-          <div class="actions">
-            <el-button
-              v-if="canTransferCreator(member)"
-              type="primary"
-              text
-              size="small"
-              title="转交创建者"
-              @click="$emit('transferCreator', member)"
-            >
-              <el-icon><Promotion /></el-icon>
-            </el-button>
-            <el-button
-              v-if="canRemove(member)"
-              type="danger"
-              text
-              size="small"
-              title="移除成员"
-              @click="$emit('removeMember', member)"
-            >
-              <el-icon><Delete /></el-icon>
-            </el-button>
           </div>
         </div>
       </div>
@@ -185,6 +148,8 @@ const canTransferCreator = (member: MemberVO) => {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  min-width: 0;
 }
 
 .title {
@@ -192,11 +157,6 @@ const canTransferCreator = (member: MemberVO) => {
   font-weight: 700;
   margin: 0;
   color: var(--cd-text-primary);
-}
-
-.history-switch {
-  --el-switch-on-color: var(--cd-primary);
-  --el-switch-off-color: #d1d5db;
 }
 
 .collapse-btn {
@@ -216,10 +176,14 @@ const canTransferCreator = (member: MemberVO) => {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 8px 8px;
   border: 1px solid transparent;
   border-radius: 12px;
   transition: background var(--cd-transition), border-color var(--cd-transition);
+}
+
+.member-item :deep(.el-avatar) {
+  flex-shrink: 0;
 }
 
 .member-item:hover {
@@ -229,7 +193,18 @@ const canTransferCreator = (member: MemberVO) => {
 
 .meta {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.name-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
 }
 
 .name {
@@ -239,6 +214,7 @@ const canTransferCreator = (member: MemberVO) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .status {
@@ -259,6 +235,36 @@ const canTransferCreator = (member: MemberVO) => {
   background: var(--cd-accent-mint);
   box-shadow: 0 0 0 3px rgba(49, 211, 189, 0.18);
   animation: pulse-green 2s infinite;
+}
+
+.role-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #4b5563;
+  line-height: 16px;
+  padding: 0 6px;
+  background: #eef2f7;
+  border: 1px solid #e1e7f0;
+  border-radius: 999px;
+  text-transform: lowercase;
+}
+
+.role-tag-owner {
+  color: #ffffff;
+  background: #f6c53c;
+  border-color: #f6c53c;
+}
+
+.role-tag-manager {
+  color: #ffffff;
+  background: #4dd6c8;
+  border-color: #4dd6c8;
+}
+
+.role-tag-editor {
+  color: #1f4fbd;
+  background: #eef3ff;
+  border-color: #dbe6ff;
 }
 
 .dot-offline {
@@ -283,12 +289,6 @@ const canTransferCreator = (member: MemberVO) => {
   color: var(--cd-text-muted);
   text-align: center;
   padding: 20px 0;
-}
-
-.actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
 }
 
 .panel-fade-enter-active,
