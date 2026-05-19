@@ -741,6 +741,34 @@ const getGraphicCenter = (graphic: GraphicVO): Point => {
   }
 }
 
+const getLocalResizeBounds = (graphic: GraphicVO) => {
+  if (graphic.objectType === 'circle') {
+    const width = Math.max(1, Math.abs(graphic.width ?? 0))
+    const height = Math.max(1, Math.abs(graphic.height ?? 0))
+    return {
+      x: graphic.positionX - width / 2,
+      y: graphic.positionY - height / 2,
+      width,
+      height,
+    }
+  }
+  if (graphic.objectType === 'path') {
+    const points = graphic.pathPoints ?? []
+    if (points.length === 0) {
+      return normalizeRect(graphic.positionX, graphic.positionY, 1, 1)
+    }
+    const xs = points.map((p) => p.x)
+    const ys = points.map((p) => p.y)
+    return {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      width: Math.max(1, Math.max(...xs) - Math.min(...xs)),
+      height: Math.max(1, Math.max(...ys) - Math.min(...ys)),
+    }
+  }
+  return normalizeRect(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0)
+}
+
 const pointToSegmentDistance = (p: Point, start: Point, end: Point): number => {
   const dx = end.x - start.x
   const dy = end.y - start.y
@@ -1222,18 +1250,19 @@ const drawSelection = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   ctx.setLineDash(isFocused || isConflictFocused ? [] : [4, 4])
   ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height)
   ctx.setLineDash([])
+  const resizeHandles = getResizeHandlePoints(graphic)
   const handles: Point[] =
     graphic.objectType === 'text'
-      ? [{ x: bounds.x + bounds.width, y: bounds.y + bounds.height }]
+      ? [resizeHandles.se]
       : [
-          { x: bounds.x, y: bounds.y },
-          { x: bounds.x + bounds.width / 2, y: bounds.y },
-          { x: bounds.x + bounds.width, y: bounds.y },
-          { x: bounds.x, y: bounds.y + bounds.height / 2 },
-          { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 },
-          { x: bounds.x, y: bounds.y + bounds.height },
-          { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height },
-          { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+          resizeHandles.nw,
+          resizeHandles.n,
+          resizeHandles.ne,
+          resizeHandles.w,
+          resizeHandles.e,
+          resizeHandles.sw,
+          resizeHandles.s,
+          resizeHandles.se,
         ]
   ctx.fillStyle = isConflictFocused ? '#ef4444' : isFocused ? '#f59e0b' : '#1890ff'
   handles.forEach((point) => {
@@ -1247,8 +1276,9 @@ const drawSelection = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
     graphic.objectType === 'path'
   ) {
     const rotateHandle = getRotateHandlePoint(graphic)
+    const rotateAnchor = resizeHandles.n
     ctx.beginPath()
-    ctx.moveTo(bounds.x + bounds.width / 2, bounds.y)
+    ctx.moveTo(rotateAnchor.x, rotateAnchor.y)
     ctx.lineTo(rotateHandle.x, rotateHandle.y)
     ctx.strokeStyle = ctx.fillStyle as string
     ctx.lineWidth = 1
@@ -1350,24 +1380,44 @@ const drawSelectionRectOverlay = (ctx: CanvasRenderingContext2D) => {
 }
 
 const getResizeHandlePoints = (graphic: GraphicVO): Record<ResizeHandleKey, Point> => {
-  const bounds = getGraphicBounds(graphic)
+  const local = getLocalResizeBounds(graphic)
+  const rotation = (graphic.rotation ?? 0) * Math.PI / 180
+  const center = getGraphicCenter(graphic)
+  const localHandles: Record<ResizeHandleKey, Point> = {
+    n: { x: local.x + local.width / 2, y: local.y },
+    s: { x: local.x + local.width / 2, y: local.y + local.height },
+    e: { x: local.x + local.width, y: local.y + local.height / 2 },
+    w: { x: local.x, y: local.y + local.height / 2 },
+    nw: { x: local.x, y: local.y },
+    ne: { x: local.x + local.width, y: local.y },
+    sw: { x: local.x, y: local.y + local.height },
+    se: { x: local.x + local.width, y: local.y + local.height },
+  }
+  if (!rotation) {
+    return localHandles
+  }
   return {
-    n: { x: bounds.x + bounds.width / 2, y: bounds.y },
-    s: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height },
-    e: { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 },
-    w: { x: bounds.x, y: bounds.y + bounds.height / 2 },
-    nw: { x: bounds.x, y: bounds.y },
-    ne: { x: bounds.x + bounds.width, y: bounds.y },
-    sw: { x: bounds.x, y: bounds.y + bounds.height },
-    se: { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+    n: rotatePointAround(localHandles.n, center, rotation),
+    s: rotatePointAround(localHandles.s, center, rotation),
+    e: rotatePointAround(localHandles.e, center, rotation),
+    w: rotatePointAround(localHandles.w, center, rotation),
+    nw: rotatePointAround(localHandles.nw, center, rotation),
+    ne: rotatePointAround(localHandles.ne, center, rotation),
+    sw: rotatePointAround(localHandles.sw, center, rotation),
+    se: rotatePointAround(localHandles.se, center, rotation),
   }
 }
 
 const getRotateHandlePoint = (graphic: GraphicVO): Point => {
-  const bounds = getGraphicBounds(graphic)
+  const handles = getResizeHandlePoints(graphic)
+  const center = getGraphicCenter(graphic)
+  const north = handles.n
+  const vx = north.x - center.x
+  const vy = north.y - center.y
+  const len = Math.hypot(vx, vy) || 1
   return {
-    x: bounds.x + bounds.width / 2,
-    y: bounds.y - ROTATE_HANDLE_OFFSET,
+    x: north.x + (vx / len) * ROTATE_HANDLE_OFFSET,
+    y: north.y + (vy / len) * ROTATE_HANDLE_OFFSET,
   }
 }
 
@@ -1683,7 +1733,14 @@ const updateGraphicByResize = (
   sourceGraphic?: GraphicVO | null,
 ): GraphicVO => {
   const base = sourceGraphic ?? graphic
-  const bounds = getGraphicBounds(base)
+  const localBounds = getLocalResizeBounds(base)
+  const center = getGraphicCenter(base)
+  const rotationDeg = base.rotation ?? 0
+  const rotation = (rotationDeg * Math.PI) / 180
+  const toLocal = (p: Point) => (rotation ? rotatePointAround(p, center, -rotation) : p)
+  const toWorld = (p: Point) => (rotation ? rotatePointAround(p, center, rotation) : p)
+  const movingLocal = toLocal(moving)
+  const bounds = localBounds
   const anchor: Point = (() => {
     if (handle === 'nw') return { x: bounds.x + bounds.width, y: bounds.y + bounds.height }
     if (handle === 'ne') return { x: bounds.x, y: bounds.y + bounds.height }
@@ -1695,23 +1752,46 @@ const updateGraphicByResize = (
     return { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 }
   })()
 
-  if (base.objectType === 'rect' || base.objectType === 'image' || base.objectType === 'path' || base.objectType === 'line') {
-    return applyTransformToGraphic(base, bounds, resizeBoundsByHandle(bounds, handle, moving))
+  if (base.objectType === 'rect' || base.objectType === 'image') {
+    const targetBounds = resizeBoundsByHandle(bounds, handle, movingLocal)
+    const topLeft = toWorld({ x: targetBounds.x, y: targetBounds.y })
+    const nextCenter = toWorld({ x: targetBounds.x + targetBounds.width / 2, y: targetBounds.y + targetBounds.height / 2 })
+    const alignedTopLeft = {
+      x: nextCenter.x - targetBounds.width / 2,
+      y: nextCenter.y - targetBounds.height / 2,
+    }
+    return {
+      ...base,
+      positionX: rotation ? alignedTopLeft.x : topLeft.x,
+      positionY: rotation ? alignedTopLeft.y : topLeft.y,
+      width: targetBounds.width,
+      height: targetBounds.height,
+    }
+  }
+
+  if (base.objectType === 'path' || base.objectType === 'line') {
+    const targetBounds = resizeBoundsByHandle(bounds, handle, movingLocal)
+    const transformed = applyTransformToGraphic(base, bounds, targetBounds)
+    if (!rotation) {
+      return transformed
+    }
+    return rotateGraphicAround(transformed, center, rotationDeg)
   }
 
   if (base.objectType === 'text') {
-    const rect = normalizeResizeRectFromHandle(anchor, moving)
-    const originalBounds = getGraphicBounds(base)
+    const rect = normalizeResizeRectFromHandle(anchor, movingLocal)
+    const originalBounds = localBounds
     const baseHeight = Math.max(1, originalBounds.height)
     const ratio = rect.height / baseHeight
     const nextFontSize = Math.max(
       TEXT_MIN_FONT_SIZE,
       Math.min(TEXT_MAX_FONT_SIZE, Math.round((base.fontSize ?? 16) * ratio)),
     )
+    const rectCenterWorld = toWorld({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })
     return {
       ...base,
-      positionX: rect.x,
-      positionY: rect.y,
+      positionX: rectCenterWorld.x - rect.width / 2,
+      positionY: rectCenterWorld.y - rect.height / 2,
       width: rect.width,
       height: rect.height,
       fontSize: nextFontSize,
@@ -1719,21 +1799,23 @@ const updateGraphicByResize = (
   }
 
   if (base.objectType === 'circle') {
-    const targetBounds = resizeBoundsByHandle(bounds, handle, moving)
+    const targetBounds = resizeBoundsByHandle(bounds, handle, movingLocal)
+    const circleCenter = toWorld({ x: targetBounds.x + targetBounds.width / 2, y: targetBounds.y + targetBounds.height / 2 })
     return {
       ...base,
-      positionX: targetBounds.x + targetBounds.width / 2,
-      positionY: targetBounds.y + targetBounds.height / 2,
+      positionX: circleCenter.x,
+      positionY: circleCenter.y,
       width: targetBounds.width,
       height: targetBounds.height,
     }
   }
 
-  const rect = normalizeResizeRectFromHandle(anchor, moving)
+  const rect = normalizeResizeRectFromHandle(anchor, movingLocal)
+  const fallbackCenter = toWorld({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })
   return {
     ...base,
-    positionX: rect.x + rect.width / 2,
-    positionY: rect.y + rect.height / 2,
+    positionX: fallbackCenter.x,
+    positionY: fallbackCenter.y,
     width: rect.width,
     height: rect.height,
   }
@@ -4536,11 +4618,7 @@ const handleMouseMove = (event: MouseEvent) => {
     }
     const source = resizeState.value.originalGraphic
     const resized = updateGraphicByResize(current, handle, point, source)
-    if (source) {
-      canvasStore.graphics[index] = rotateGraphicAround(resized, getGraphicCenter(source), source.rotation ?? 0)
-    } else {
-      canvasStore.graphics[index] = resized
-    }
+    canvasStore.graphics[index] = resized
     scheduleRender()
     return
   }
