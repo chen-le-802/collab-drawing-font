@@ -586,3 +586,37 @@
     padding: 6px;
   }
 }
+
+@media (max-width: 1366px) {
+  .draw-main {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .canvas-area {
+    padding: 8px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .canvas-area {
+    padding: 7px;
+  }
+
+  .draw-page {
+    grid-template-rows: 52px 1fr 28px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .canvas-area {
+    padding: 6px;
+  }
+
+  .draw-main {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .canvas-container {
+    min-height: 150px;
+  }
+}

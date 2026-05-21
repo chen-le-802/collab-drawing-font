@@ -67,9 +67,9 @@ const onCustomColorChange = (event: Event) => {
       :class="{ active: modelValue === 'transparent' }"
       :disabled="disabled"
       @click="pickColor('transparent')"
-      title="透明"
+      title="无填充（透明）"
     >
-      
+      <span class="transparent-cross" aria-hidden="true"></span>
     </button>
     <button
       v-for="color in presetColors"
@@ -128,11 +128,30 @@ const onCustomColorChange = (event: Event) => {
 }
 
 .transparent-item {
-  background: #ffffff;
-  border-color: #cbd5e1;
+  position: relative;
+  background:
+    linear-gradient(45deg, #e2e8f0 25%, transparent 25%, transparent 75%, #e2e8f0 75%, #e2e8f0),
+    linear-gradient(45deg, #e2e8f0 25%, transparent 25%, transparent 75%, #e2e8f0 75%, #e2e8f0);
+  background-position: 0 0, 6px 6px;
+  background-size: 12px 12px;
+  background-color: #ffffff;
+  border-color: #94a3b8;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.transparent-cross {
+  width: 2px;
+  height: 18px;
+  background: #ef4444;
+  transform: rotate(45deg);
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
+}
+
+.color-picker-compact .transparent-cross {
+  height: 13px;
 }
 
 .color-picker-compact .color-item {

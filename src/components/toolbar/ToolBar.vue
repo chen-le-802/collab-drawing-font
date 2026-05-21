@@ -371,6 +371,7 @@ onBeforeUnmount(() => {
   border-radius: var(--cd-radius-lg);
   box-shadow: var(--cd-shadow-card);
   overflow-y: auto;
+  overflow-x: hidden;
   max-height: calc(100vh - 52px - 30px - 40px);
 }
 
@@ -761,6 +762,88 @@ onBeforeUnmount(() => {
   height: 13px;
   border: 2px solid currentColor;
   border-radius: 50%;
+}
+
+@media (max-width: 1366px) {
+  .toolbar-wrap {
+    width: 132px;
+    padding: 8px;
+    margin: 8px 0 8px 8px;
+    gap: 8px;
+    max-height: calc(100vh - 52px - 24px - 40px);
+  }
+
+  .tool-btn {
+    width: 50px;
+    height: 36px;
+    border-radius: 10px;
+  }
+
+  .action-btn {
+    width: 34px;
+    height: 30px;
+    border-radius: 9px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .toolbar-wrap {
+    width: 126px;
+    padding: 7px;
+    margin: 7px 0 7px 7px;
+    gap: 7px;
+  }
+
+  .tools {
+    gap: 3px;
+  }
+
+  .tool-btn {
+    width: 46px;
+    height: 34px;
+  }
+
+  .section {
+    gap: 4px;
+  }
+
+  .section-label {
+    font-size: 10px;
+  }
+
+  .width-chip,
+  .style-chip {
+    height: 24px;
+    font-size: 11px;
+  }
+
+  .action-row {
+    gap: 3px;
+  }
+
+  .action-btn {
+    width: 32px;
+    height: 28px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .toolbar-wrap {
+    width: 122px;
+    padding: 6px;
+    margin: 6px 0 6px 6px;
+    gap: 6px;
+  }
+
+  .tool-btn {
+    width: 42px;
+    height: 32px;
+    font-size: 14px;
+  }
+
+  .zoom-display {
+    font-size: 12px;
+  }
 }
 
 </style>

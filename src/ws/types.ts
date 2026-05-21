@@ -45,7 +45,7 @@ export interface CreateGraphicData {
   height?: number
   strokeColor: string
   lineStyle?: 'solid' | 'dashed'
-  fillColor?: string
+  fillColor?: string | null
   strokeWidth: number
   zIndex: number
   textContent?: string
@@ -73,7 +73,7 @@ export interface UpdateGraphicData {
     height?: number
     strokeColor?: string
     lineStyle?: 'solid' | 'dashed'
-    fillColor?: string
+    fillColor?: string | null
     strokeWidth?: number
     zIndex?: number
     textContent?: string
@@ -88,7 +88,7 @@ export interface UpdateGraphicData {
   height?: number
   strokeColor?: string
   lineStyle?: 'solid' | 'dashed'
-  fillColor?: string
+  fillColor?: string | null
   strokeWidth?: number
   zIndex?: number
   textContent?: string

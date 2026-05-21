@@ -30,6 +30,7 @@ const props = withDefaults(
     canPauseCanvas?: boolean
     isPaused?: boolean
     showGrid?: boolean
+    backgroundColor?: string
     focusMode?: boolean
   }>(),
   {
@@ -39,6 +40,7 @@ const props = withDefaults(
     canPauseCanvas: false,
     isPaused: false,
     showGrid: true,
+    backgroundColor: '#ffffff',
     focusMode: false,
   },
 )
@@ -52,6 +54,7 @@ const emit = defineEmits<{
   showConflicts: []
   showVersions: []
   showGuide: []
+  showBackground: []
   toggleGrid: []
   toggleFocusMode: []
   showMembersManage: []
@@ -148,7 +151,7 @@ const handleMoreCommand = (command: string) => {
     <div class="right">
       <button class="back-btn" @click="$emit('back')">
         <el-icon><ArrowLeft /></el-icon>
-        返回列表
+        <span class="back-label">返回列表</span>
       </button>
 
       <div class="divider"></div>
@@ -162,6 +165,10 @@ const handleMoreCommand = (command: string) => {
       <button class="text-icon-btn" :title="showGrid ? '隐藏网格' : '显示网格'" @click="$emit('toggleGrid')">
         <el-icon><Grid /></el-icon>
         <span>{{ showGrid ? '隐藏网格' : '显示网格' }}</span>
+      </button>
+      <button class="text-icon-btn" title="画布背景" @click="$emit('showBackground')">
+        <span class="bg-dot" :style="{ backgroundColor: backgroundColor }"></span>
+        <span>背景色</span>
       </button>
       <button class="text-icon-btn" title="快捷键" @click="$emit('showShortcuts')">
         <span class="toolbar-kbd">K</span>
@@ -405,6 +412,14 @@ const handleMoreCommand = (command: string) => {
   font-weight: 700;
 }
 
+.bg-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.8);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
+}
+
 .menu-icon {
   margin-right: 6px;
   font-size: 14px;
@@ -457,5 +472,83 @@ const handleMoreCommand = (command: string) => {
 .back-btn:hover {
   border-color: var(--cd-primary);
   color: var(--cd-primary);
+}
+
+@media (max-width: 1366px) {
+  .top-bar {
+    gap: 8px;
+    padding: 0 10px;
+  }
+
+  .brand-name {
+    display: none;
+  }
+
+  .session-name {
+    min-width: 96px;
+    max-width: 180px;
+  }
+
+  .right {
+    gap: 6px;
+  }
+
+  .text-icon-btn {
+    gap: 4px;
+    padding: 0 8px;
+  }
+
+  .text-icon-btn span:last-child {
+    display: none;
+  }
+
+  .back-btn {
+    padding: 6px 10px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .top-bar {
+    grid-template-columns: auto 1fr auto;
+    gap: 6px;
+    padding: 0 8px;
+  }
+
+  .session-name {
+    min-width: 80px;
+    max-width: 140px;
+  }
+
+  .center {
+    justify-self: center;
+    min-width: 0;
+  }
+
+  .avatars {
+    padding: 3px 8px;
+  }
+
+  .avatars .el-avatar {
+    --el-avatar-size: 24px;
+  }
+
+  .back-label,
+  .divider {
+    display: none;
+  }
+
+  .user-avatar {
+    margin-left: 0;
+  }
+}
+
+@media (max-width: 1024px) {
+  .session-name {
+    display: none;
+  }
+
+  .center {
+    display: none;
+  }
 }
 </style>

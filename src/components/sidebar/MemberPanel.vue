@@ -81,7 +81,7 @@ const displayName = (member: MemberVO) => {
 </script>
 
 <template>
-  <aside class="member-panel" :class="{ collapsed: collapsed }">
+  <aside class="member-panel" :class="{ collapsed: collapsed }" data-guide="member-panel">
     <div class="panel-header">
       <div class="title-wrap" v-if="!collapsed">
         <h3 class="title">在线成员</h3>
@@ -299,5 +299,70 @@ const displayName = (member: MemberVO) => {
 .panel-fade-enter-from,
 .panel-fade-leave-to {
   opacity: 0;
+}
+
+@media (max-width: 1366px) {
+  .member-panel {
+    width: 188px;
+    margin: 8px 8px 8px 0;
+  }
+
+  .member-panel.collapsed {
+    width: 42px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .member-panel {
+    width: 166px;
+    margin: 7px 7px 7px 0;
+  }
+
+  .panel-header {
+    height: 44px;
+    padding: 0 8px;
+  }
+
+  .member-list {
+    padding: 8px;
+    gap: 5px;
+  }
+
+  .member-item {
+    gap: 6px;
+    padding: 6px;
+    border-radius: 10px;
+  }
+
+  .member-item :deep(.el-avatar) {
+    --el-avatar-size: 26px;
+  }
+
+  .name {
+    font-size: 12px;
+  }
+
+  .role-tag {
+    font-size: 9px;
+    line-height: 14px;
+    padding: 0 5px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .member-panel {
+    width: 44px;
+  }
+
+  .member-list,
+  .title-wrap {
+    display: none;
+  }
+
+  .panel-header {
+    height: 42px;
+    justify-content: center;
+    border-bottom: none;
+  }
 }
 </style>

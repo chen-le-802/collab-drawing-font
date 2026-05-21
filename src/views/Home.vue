@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   CirclePlus,
@@ -13,7 +13,6 @@ import {
   Tickets,
 } from '@element-plus/icons-vue'
 import SessionCard from '@/components/session/SessionCard.vue'
-import OnboardingGuide from '@/views/DrawCanvas/components/OnboardingGuide.vue'
 import SessionCreate from '@/views/SessionCreate.vue'
 import { graphicApi } from '@/api/graphic'
 import { sessionApi } from '@/api/session'
@@ -24,6 +23,8 @@ import type { SessionVO } from '@/types/session'
 import type { GuideStep } from '@/views/DrawCanvas/components/OnboardingGuide.vue'
 import { confirmDanger, feedback } from '@/utils/feedback'
 import { resolveSessionErrorMessage } from '@/utils/sessionError'
+
+const OnboardingGuide = defineAsyncComponent(() => import('@/views/DrawCanvas/components/OnboardingGuide.vue'))
 
 const route = useRoute()
 const router = useRouter()

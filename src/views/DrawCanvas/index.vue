@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 
@@ -7,13 +7,7 @@ import MemberPanel from '@/components/sidebar/MemberPanel.vue'
 import StatusBar from '@/components/statusbar/StatusBar.vue'
 import ToolBar, { type CanvasTool, type GraphicLineStyle, type ShapeToolType } from '@/components/toolbar/ToolBar.vue'
 import TopBar from '@/components/toolbar/TopBar.vue'
-import ConflictLogDialog from '@/views/DrawCanvas/components/ConflictLogDialog.vue'
-import InviteDialog from '@/views/DrawCanvas/components/InviteDialog.vue'
-import MemberManageDialog from '@/views/DrawCanvas/components/MemberManageDialog.vue'
-import OnboardingGuide, { type GuideStep } from '@/views/DrawCanvas/components/OnboardingGuide.vue'
-import OperationTimelineDialog from '@/views/DrawCanvas/components/OperationTimelineDialog.vue'
-import ShortcutHelpDialog from '@/views/DrawCanvas/components/ShortcutHelpDialog.vue'
-import VersionHistoryDialog from '@/views/DrawCanvas/components/VersionHistoryDialog.vue'
+import type { GuideStep } from '@/views/DrawCanvas/components/OnboardingGuide.vue'
 import { graphicApi } from '@/api/graphic'
 import { sessionApi } from '@/api/session'
 import { userApi } from '@/api/user'
@@ -45,7 +39,6 @@ import type {
   MemberStatusChangedData,
   OperationResolvedData,
   OperationVO,
-  PresenceCursorData,
   PresenceSelectionData,
   ReconnectFailedEventData,
   ReconnectingEventData,
@@ -55,6 +48,14 @@ import type {
   WsErrorData,
 } from '@/ws/types'
 import './styles.css'
+
+const ConflictLogDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/ConflictLogDialog.vue'))
+const InviteDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/InviteDialog.vue'))
+const MemberManageDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/MemberManageDialog.vue'))
+const OnboardingGuide = defineAsyncComponent(() => import('@/views/DrawCanvas/components/OnboardingGuide.vue'))
+const OperationTimelineDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/OperationTimelineDialog.vue'))
+const ShortcutHelpDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/ShortcutHelpDialog.vue'))
+const VersionHistoryDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/VersionHistoryDialog.vue'))
 
 type Point = { x: number; y: number }
 
@@ -237,6 +238,8 @@ const exportDialogVisible = ref(false)
 const exportFormat = ref<'png' | 'svg' | 'pdf'>('png')
 const exportIncludeGrid = ref(true)
 const showGrid = ref(true)
+const backgroundDialogVisible = ref(false)
+const canvasBackgroundColor = ref('#ffffff')
 const focusMode = ref(false)
 const focusActionsPos = ref<Point>({ x: 16, y: 68 })
 const focusActionsCollapsed = ref(false)
@@ -244,13 +247,46 @@ const focusActionsDragging = ref(false)
 const focusActionsDragOffset = ref<Point>({ x: 0, y: 0 })
 const technicalMode = ref(false)
 const onboardingVisible = ref(false)
-const onboardingSteps = ref<GuideStep[]>([
-  { selector: '[data-guide="topbar"]', title: '顶部工具区', content: '在这里可以分享会话、导出画布、查看版本与冲突。', placement: 'bottom' },
-  { selector: '[data-guide="toolbar"]', title: '左侧绘图工具', content: '选择工具、图形、文本、画笔与样式设置都在这里。', placement: 'right' },
-  { selector: '[data-guide="style-section"]', title: '样式面板', content: '调整描边、填充、线宽与线型。', placement: 'right' },
-  { selector: '[data-guide="topbar-members"]', title: '成员协作区', content: '可查看成员在线状态并打开成员管理。', placement: 'bottom' },
-  { selector: '.status-bar', title: '状态栏', content: '可查看同步状态、版本信息与连接状态。', placement: 'top' },
-])
+const baseOnboardingSteps: GuideStep[] = [
+  {
+    selector: '[data-guide="toolbar"]',
+    title: '工具区',
+    content: '先在这里选择选择器、形状、文本、画笔等工具。',
+    placement: 'right',
+  },
+  {
+    selector: '[data-guide="style-section"]',
+    title: '样式区',
+    content: '可调整填充、描边、线宽和线型，统一图形风格。',
+    placement: 'right',
+  },
+  {
+    selector: '.canvas-container',
+    title: '画布区',
+    content: '在这里拖拽、拉伸、旋转对象；多人编辑会自动实时同步。',
+    placement: 'corner',
+    highlight: false,
+  },
+  {
+    selector: '[data-guide="topbar-members"]',
+    title: '在线成员',
+    content: '这里可以快速确认谁在线，方便开始语音或分工协作。',
+    placement: 'bottom',
+  },
+  {
+    selector: '[data-guide="member-panel"]',
+    title: '成员与权限',
+    content: '右侧面板可看成员状态与角色（owner/manager/editor/viewer）。',
+    placement: 'left',
+  },
+  {
+    selector: '[data-guide="topbar-more"]',
+    title: '管理与恢复入口',
+    content: '“更多操作”里有成员管理、冲突日志、版本快照和恢复。',
+    placement: 'bottom',
+  },
+]
+const onboardingSteps = ref<GuideStep[]>(baseOnboardingSteps)
 const importingImage = ref(false)
 const imageFileInputRef = ref<HTMLInputElement | null>(null)
 const conflictLogs = ref<SessionConflictLogItemVO[]>([])
@@ -303,6 +339,7 @@ const draft = ref<DraftGraphic>({
   end: { x: 0, y: 0 },
   points: [],
 })
+const pointerPressed = ref(false)
 
 const dragMove = ref<DragMove>({
   active: false,
@@ -618,10 +655,16 @@ const TEXT_MIN_FONT_SIZE = 10
 const TEXT_MAX_FONT_SIZE = 120
 const ARROW_HEAD_BASE = 10
 const ARROW_HEAD_MAX = 24
+const IMAGE_INSERT_BOX_WIDTH = 240
+const IMAGE_INSERT_BOX_HEIGHT = 180
+const VIEWPORT_CULL_MARGIN = 160
 const CURSOR_SEND_INTERVAL_MS = 80
 const CURSOR_SEND_MIN_DISTANCE = 3
+const CURSOR_IDLE_KEEPALIVE_MS = 10_000
 const REMOTE_CURSOR_STALE_MS = 12_000
 const REMOTE_SELECTION_STALE_MS = 45_000
+const CANVAS_BACKGROUND_KEY = 'collab_canvas_background_v1'
+const canvasBackgroundPresets = ['#ffffff', '#f8fafc', '#f6f7fb', '#fefce8', '#f0fdf4', '#eef2ff', '#fff1f2', '#f5f3ff']
 const imageElementCache = new Map<string, HTMLImageElement>()
 const imageFallbackLoading = new Set<string>()
 const imageObjectUrlBySource = new Map<string, string>()
@@ -630,6 +673,44 @@ const getWsUrl = (): string => {
   const baseApi = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000/api/'
   const origin = baseApi.replace(/\/api\/?$/, '')
   return `${origin.replace(/^http/i, 'ws')}/ws`
+}
+
+const getApiOrigin = (): string => {
+  const baseApi = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000/api/'
+  return baseApi.replace(/\/api\/?$/, '')
+}
+
+const loadImageNaturalSize = async (file: File): Promise<{ width: number; height: number } | null> => {
+  const objectUrl = URL.createObjectURL(file)
+  try {
+    const size = await new Promise<{ width: number; height: number } | null>((resolve) => {
+      const image = new Image()
+      image.onload = () => {
+        const width = Number.isFinite(image.naturalWidth) ? image.naturalWidth : 0
+        const height = Number.isFinite(image.naturalHeight) ? image.naturalHeight : 0
+        if (width > 0 && height > 0) {
+          resolve({ width, height })
+          return
+        }
+        resolve(null)
+      }
+      image.onerror = () => resolve(null)
+      image.src = objectUrl
+    })
+    return size
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
+const resolveImageInsertSize = (naturalWidth: number, naturalHeight: number): { width: number; height: number } => {
+  if (naturalWidth <= 0 || naturalHeight <= 0) {
+    return { width: IMAGE_INSERT_BOX_WIDTH, height: IMAGE_INSERT_BOX_HEIGHT }
+  }
+  const scale = Math.min(IMAGE_INSERT_BOX_WIDTH / naturalWidth, IMAGE_INSERT_BOX_HEIGHT / naturalHeight)
+  const width = Math.max(1, Math.round(naturalWidth * scale))
+  const height = Math.max(1, Math.round(naturalHeight * scale))
+  return { width, height }
 }
 
 const loadOrCreateClientId = () => {
@@ -642,6 +723,53 @@ const loadOrCreateClientId = () => {
   const next = `client_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
   localStorage.setItem(cacheKey, next)
   collabClientId.value = next
+}
+
+const normalizeHexColor = (value: string): string | null => {
+  const text = value.trim()
+  if (!text) {
+    return null
+  }
+  const withPrefix = text.startsWith('#') ? text : `#${text}`
+  if (!/^#([0-9a-fA-F]{6})$/.test(withPrefix)) {
+    return null
+  }
+  return withPrefix.toLowerCase()
+}
+
+const loadCanvasBackgroundColor = () => {
+  const cached = localStorage.getItem(CANVAS_BACKGROUND_KEY)
+  const normalized = cached ? normalizeHexColor(cached) : null
+  canvasBackgroundColor.value = normalized ?? '#ffffff'
+}
+
+const saveCanvasBackgroundColor = (value: string) => {
+  localStorage.setItem(CANVAS_BACKGROUND_KEY, value)
+}
+
+const hexToRgb = (value: string): { r: number; g: number; b: number } | null => {
+  const normalized = normalizeHexColor(value)
+  if (!normalized) {
+    return null
+  }
+  const raw = normalized.slice(1)
+  const r = Number.parseInt(raw.slice(0, 2), 16)
+  const g = Number.parseInt(raw.slice(2, 4), 16)
+  const b = Number.parseInt(raw.slice(4, 6), 16)
+  if (![r, g, b].every((item) => Number.isFinite(item))) {
+    return null
+  }
+  return { r, g, b }
+}
+
+const getGridColorForBackground = (backgroundHex: string): string => {
+  const rgb = hexToRgb(backgroundHex)
+  if (!rgb) {
+    return 'rgba(148, 163, 184, 0.22)'
+  }
+  const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255
+  const alpha = luminance > 0.62 ? 0.22 : 0.3
+  return luminance > 0.62 ? `rgba(148, 163, 184, ${alpha})` : `rgba(241, 245, 249, ${alpha})`
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {
@@ -863,6 +991,12 @@ const startHeartbeat = () => {
     if (document.visibilityState === 'visible') {
       void sendHeartbeat()
       broadcastSelectionPresence(true)
+      if (lastCursorPoint.value) {
+        const nowAt = Date.now()
+        if (nowAt - lastCursorSentAt.value >= CURSOR_IDLE_KEEPALIVE_MS) {
+          broadcastCursorPresence(lastCursorPoint.value, true)
+        }
+      }
     }
   }, HEARTBEAT_MS)
 }
@@ -902,6 +1036,13 @@ const clearRemoteSelectionByUserId = (userId: number) => {
     return
   }
   delete remoteSelections.value[userId]
+}
+
+const broadcastCursorPresence = (point: Point, force = false) => {
+  // 产品要求：关闭实时鼠标光标追踪，仅保留选中态等协作感知。
+  // 这里不再发送 presence_cursor。
+  void point
+  void force
 }
 
 const PRESENCE_COLOR_PALETTE = [
@@ -1453,6 +1594,25 @@ const estimatePathRotationRad = (points: Point[]): number => {
   return normalizeAngleRad(bestAngle)
 }
 
+const shouldUseEstimatedPathRotation = (graphic: GraphicVO): boolean => {
+  const points = graphic.pathPoints ?? []
+  if (points.length < 4) {
+    return false
+  }
+  if (!isClosedPath(points)) {
+    return false
+  }
+  const normalized = [...points]
+  const first = normalized[0]
+  const last = normalized[normalized.length - 1]
+  if (first && last && Math.hypot(first.x - last.x, first.y - last.y) <= PATH_CLOSE_DISTANCE) {
+    normalized.pop()
+  }
+  // 仅对规则多边形这类顶点较少的闭合 path 使用估算角度；
+  // 自由画笔等复杂路径默认按轴向框选与拉伸，方向更符合预期。
+  return normalized.length >= 3 && normalized.length <= 8
+}
+
 const getGraphicSelectionRotationRad = (graphic: GraphicVO): number => {
   if (isLineLikeGraphic(graphic)) {
     return 0
@@ -1465,6 +1625,9 @@ const getGraphicSelectionRotationRad = (graphic: GraphicVO): number => {
   // 拉伸过程中对 pathPoints 重新估算角度导致手柄跳变。
   if (Math.abs(explicit) > 1e-6) {
     return explicit
+  }
+  if (!shouldUseEstimatedPathRotation(graphic)) {
+    return 0
   }
   return estimatePathRotationRad(graphic.pathPoints ?? [])
 }
@@ -1578,6 +1741,17 @@ const pointInGraphic = (point: Point, graphic: GraphicVO): boolean => {
 const pickGraphic = (point: Point): GraphicVO | null => {
   const reverse = [...sortedGraphics.value].reverse()
   for (const graphic of reverse) {
+    // 先做一次粗粒度包围盒过滤，减少复杂命中计算次数。
+    const bounds = getGraphicBounds(graphic)
+    const pad = Math.max(8, graphic.strokeWidth + 4)
+    if (
+      point.x < bounds.x - pad ||
+      point.x > bounds.x + bounds.width + pad ||
+      point.y < bounds.y - pad ||
+      point.y > bounds.y + bounds.height + pad
+    ) {
+      continue
+    }
     if (pointInGraphic(point, graphic)) {
       return graphic
     }
@@ -1658,6 +1832,36 @@ const drawPath = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   if (points.length < 2) {
     return
   }
+  if (isArrowPathGraphic(graphic)) {
+    const start = points[0]
+    const end = points[1]
+    const left = points[2]
+    const right = points[4]
+    if (!start || !end || !left || !right) {
+      return
+    }
+    ctx.strokeStyle = graphic.strokeColor
+    ctx.lineWidth = graphic.strokeWidth
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+
+    // Arrow shaft follows selected line style (solid/dashed).
+    ctx.setLineDash(graphic.lineStyle === 'dashed' ? [8, 6] : [])
+    ctx.beginPath()
+    ctx.moveTo(start.x, start.y)
+    ctx.lineTo(end.x, end.y)
+    ctx.stroke()
+
+    // Arrow head should stay solid for clear direction indication.
+    ctx.setLineDash([])
+    ctx.beginPath()
+    ctx.moveTo(end.x, end.y)
+    ctx.lineTo(left.x, left.y)
+    ctx.moveTo(end.x, end.y)
+    ctx.lineTo(right.x, right.y)
+    ctx.stroke()
+    return
+  }
   const first = points[0]
   if (!first) {
     return
@@ -1708,8 +1912,6 @@ const drawImageGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => 
     withRotation(() => {
       ctx.fillStyle = '#f3f4f6'
       ctx.fillRect(x, y, width, height)
-      ctx.strokeStyle = '#cbd5e1'
-      ctx.strokeRect(x, y, width, height)
     })
     return
   }
@@ -1718,8 +1920,6 @@ const drawImageGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => 
   if (cached && cached.complete && cached.naturalWidth > 0 && cached.naturalHeight > 0) {
     withRotation(() => {
       ctx.drawImage(cached, x, y, width, height)
-      ctx.strokeStyle = '#e5e7eb'
-      ctx.strokeRect(x, y, width, height)
     })
     return
   }
@@ -1777,8 +1977,6 @@ const drawImageGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => 
   withRotation(() => {
     ctx.fillStyle = '#f8fafc'
     ctx.fillRect(x, y, width, height)
-    ctx.strokeStyle = '#cbd5e1'
-    ctx.strokeRect(x, y, width, height)
   })
 }
 
@@ -1813,10 +2011,11 @@ const drawGrid = (
   viewTop: number,
   viewRight: number,
   viewBottom: number,
+  backgroundHex: string,
 ) => {
   const gap = 24
   ctx.save()
-  ctx.strokeStyle = '#eef2f7'
+  ctx.strokeStyle = getGridColorForBackground(backgroundHex)
   ctx.lineWidth = 1
   const startX = Math.floor(viewLeft / gap) * gap
   const endX = Math.ceil(viewRight / gap) * gap
@@ -1952,48 +2151,50 @@ const drawSelection = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   }
   ctx.setLineDash([])
   const resizeHandles = getResizeHandlePoints(graphic)
-  const arrowEndpoints = getArrowEndpoints(graphic)
-  const handles: Point[] =
-    graphic.objectType === 'line' || !!arrowEndpoints
-      ? [
-          arrowEndpoints ? arrowEndpoints.start : { x: graphic.positionX, y: graphic.positionY },
-          arrowEndpoints ? arrowEndpoints.end : { x: graphic.positionX + (graphic.width ?? 0), y: graphic.positionY + (graphic.height ?? 0) },
-        ]
-      : graphic.objectType === 'text'
-      ? [resizeHandles.se]
-      : [
-          resizeHandles.nw,
-          resizeHandles.n,
-          resizeHandles.ne,
-          resizeHandles.w,
-          resizeHandles.e,
-          resizeHandles.sw,
-          resizeHandles.s,
-          resizeHandles.se,
-        ]
-  ctx.fillStyle = isConflictFocused ? '#ef4444' : isFocused ? '#f59e0b' : '#1890ff'
-  handles.forEach((point) => {
-    ctx.fillRect(point.x - 3, point.y - 3, 6, 6)
-  })
-  if (
-    graphic.objectType === 'line' ||
-    graphic.objectType === 'rect' ||
-    graphic.objectType === 'circle' ||
-    graphic.objectType === 'text' ||
-    graphic.objectType === 'image' ||
-    graphic.objectType === 'path'
-  ) {
-    const rotateHandle = getRotateHandlePoint(graphic)
-    const rotateAnchor = resizeHandles.n
-    ctx.beginPath()
-    ctx.moveTo(rotateAnchor.x, rotateAnchor.y)
-    ctx.lineTo(rotateHandle.x, rotateHandle.y)
-    ctx.strokeStyle = ctx.fillStyle as string
-    ctx.lineWidth = 1
-    ctx.stroke()
-    ctx.beginPath()
-    ctx.arc(rotateHandle.x, rotateHandle.y, 4, 0, Math.PI * 2)
-    ctx.fill()
+  if (!graphic.isLocked) {
+    const arrowEndpoints = getArrowEndpoints(graphic)
+    const handles: Point[] =
+      graphic.objectType === 'line' || !!arrowEndpoints
+        ? [
+            arrowEndpoints ? arrowEndpoints.start : { x: graphic.positionX, y: graphic.positionY },
+            arrowEndpoints ? arrowEndpoints.end : { x: graphic.positionX + (graphic.width ?? 0), y: graphic.positionY + (graphic.height ?? 0) },
+          ]
+        : graphic.objectType === 'text'
+        ? [resizeHandles.se]
+        : [
+            resizeHandles.nw,
+            resizeHandles.n,
+            resizeHandles.ne,
+            resizeHandles.w,
+            resizeHandles.e,
+            resizeHandles.sw,
+            resizeHandles.s,
+            resizeHandles.se,
+          ]
+    ctx.fillStyle = isConflictFocused ? '#ef4444' : isFocused ? '#f59e0b' : '#1890ff'
+    handles.forEach((point) => {
+      ctx.fillRect(point.x - 3, point.y - 3, 6, 6)
+    })
+    if (
+      graphic.objectType === 'line' ||
+      graphic.objectType === 'rect' ||
+      graphic.objectType === 'circle' ||
+      graphic.objectType === 'text' ||
+      graphic.objectType === 'image' ||
+      graphic.objectType === 'path'
+    ) {
+      const rotateHandle = getRotateHandlePoint(graphic)
+      const rotateAnchor = resizeHandles.n
+      ctx.beginPath()
+      ctx.moveTo(rotateAnchor.x, rotateAnchor.y)
+      ctx.lineTo(rotateHandle.x, rotateHandle.y)
+      ctx.strokeStyle = ctx.fillStyle as string
+      ctx.lineWidth = 1
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.arc(rotateHandle.x, rotateHandle.y, 4, 0, Math.PI * 2)
+      ctx.fill()
+    }
   }
   if (graphic.isLocked) {
     const text = '已锁定'
@@ -2057,7 +2258,7 @@ const drawSelectionOutlineOnly = (ctx: CanvasRenderingContext2D, graphic: Graphi
   ctx.restore()
 }
 
-const drawMultiSelectionBounds = (ctx: CanvasRenderingContext2D) => {
+const drawMultiSelectionBounds = (ctx: CanvasRenderingContext2D, lightweight = false) => {
   const frame = multiSelectionFrame.value
   if (!frame || selectedGraphics.value.length < 2) {
     return
@@ -2094,6 +2295,10 @@ const drawMultiSelectionBounds = (ctx: CanvasRenderingContext2D) => {
   }
   ctx.closePath()
   ctx.stroke()
+  if (lightweight) {
+    ctx.restore()
+    return
+  }
   ctx.setLineDash([])
   ctx.fillStyle = '#2563eb'
   ;(
@@ -2651,7 +2856,6 @@ const updateGraphicByResize = (
   const localBounds = getLocalResizeBounds(base)
   const center = getGraphicCenter(base)
   const rotation = getGraphicSelectionRotationRad(base)
-  const rotationDeg = (rotation * 180) / Math.PI
   const toLocal = (p: Point) => (rotation ? rotatePointAround(p, center, -rotation) : p)
   const toWorld = (p: Point) => (rotation ? rotatePointAround(p, center, rotation) : p)
   const movingLocal = toLocal(moving)
@@ -2686,11 +2890,34 @@ const updateGraphicByResize = (
 
   if (base.objectType === 'path') {
     const targetBounds = resizeBoundsByHandle(bounds, handle, movingLocal)
-    const transformed = applyTransformToGraphic(base, bounds, targetBounds)
     if (!rotation) {
-      return transformed
+      return applyTransformToGraphic(base, bounds, targetBounds)
     }
-    return rotateGraphicAround(transformed, center, rotationDeg)
+    const sx = bounds.width === 0 ? 1 : targetBounds.width / bounds.width
+    const sy = bounds.height === 0 ? 1 : targetBounds.height / bounds.height
+    const basePathPoints = base.pathPoints ?? []
+    const localPathPoints = basePathPoints.map((point) => rotatePointAround(point, center, -rotation))
+    const nextLocalPathPoints = localPathPoints.map((point) => ({
+      x: targetBounds.x + (point.x - bounds.x) * sx,
+      y: targetBounds.y + (point.y - bounds.y) * sy,
+    }))
+    const nextPathPoints = nextLocalPathPoints.map((point) => rotatePointAround(point, center, rotation))
+    const xs = nextPathPoints.map((point) => point.x)
+    const ys = nextPathPoints.map((point) => point.y)
+    const nextBounds = {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      width: Math.max(1, Math.max(...xs) - Math.min(...xs)),
+      height: Math.max(1, Math.max(...ys) - Math.min(...ys)),
+    }
+    return {
+      ...base,
+      positionX: nextBounds.x,
+      positionY: nextBounds.y,
+      width: nextBounds.width,
+      height: nextBounds.height,
+      pathPoints: nextPathPoints,
+    }
   }
 
   if (base.objectType === 'text') {
@@ -2771,7 +2998,7 @@ const updateSelectedGraphicStyle = (
       canvasStore.graphics[index] = nextGraphic
       sendUpdateGraphicPatch(nextGraphic.objectKey, {
         ...(typeof patch.strokeColor === 'string' ? { strokeColor: patch.strokeColor } : {}),
-        ...(typeof patch.fillColor === 'string' ? { fillColor: patch.fillColor } : {}),
+        ...(typeof patch.fillColor !== 'undefined' ? { fillColor: patch.fillColor } : {}),
         ...(typeof patch.strokeWidth === 'number' ? { strokeWidth: patch.strokeWidth } : {}),
         ...(patch.lineStyle === 'solid' || patch.lineStyle === 'dashed' ? { lineStyle: patch.lineStyle } : {}),
       })
@@ -3035,8 +3262,19 @@ const drawRemoteSelections = (ctx: CanvasRenderingContext2D) => {
   }
 
   const ownersByObjectKey = new Map<string, RemoteSelectionState[]>()
+  const ownersBySelectionGroup = new Map<string, { objectKeys: string[]; owners: RemoteSelectionState[] }>()
   validStates.forEach((state) => {
     const keys = normalizeSelectionKeys(state.objectKeys)
+    if (keys.length > 1) {
+      const signature = [...keys].sort().join('|')
+      const entry = ownersBySelectionGroup.get(signature)
+      if (entry) {
+        entry.owners.push(state)
+      } else {
+        ownersBySelectionGroup.set(signature, { objectKeys: keys, owners: [state] })
+      }
+      return
+    }
     keys.forEach((key) => {
       const queue = ownersByObjectKey.get(key) ?? []
       queue.push(state)
@@ -3045,6 +3283,49 @@ const drawRemoteSelections = (ctx: CanvasRenderingContext2D) => {
   })
 
   ctx.save()
+  ownersBySelectionGroup.forEach((group) => {
+    const groupGraphics = group.objectKeys
+      .map((key) => canvasStore.graphics.find((item) => item.objectKey === key))
+      .filter((item): item is GraphicVO => !!item)
+    if (groupGraphics.length === 0) {
+      return
+    }
+    const boundsList = groupGraphics.map((graphic) => getGraphicBounds(graphic))
+    const left = Math.min(...boundsList.map((item) => item.x))
+    const top = Math.min(...boundsList.map((item) => item.y))
+    const right = Math.max(...boundsList.map((item) => item.x + item.width))
+    const bottom = Math.max(...boundsList.map((item) => item.y + item.height))
+    const groupBounds = {
+      x: left,
+      y: top,
+      width: right - left,
+      height: bottom - top,
+    }
+
+    const firstOwner = group.owners[0]
+    const strokeColor = firstOwner ? getPresenceColorByUserId(firstOwner.userId) : '#2563eb'
+    const labelText = firstOwner ? (firstOwner.username || `用户#${firstOwner.userId}`) : '协作中'
+
+    ctx.save()
+    ctx.strokeStyle = strokeColor
+    ctx.lineWidth = 1.2
+    ctx.setLineDash([4, 3])
+    ctx.strokeRect(groupBounds.x, groupBounds.y, groupBounds.width, groupBounds.height)
+    ctx.setLineDash([])
+
+    ctx.font = '12px sans-serif'
+    const textWidth = ctx.measureText(labelText).width
+    const padX = 6
+    const centerX = groupBounds.x + groupBounds.width / 2
+    const labelX = centerX - (textWidth + padX * 2) / 2
+    const labelY = resolveTagTopY(groupBounds.y, 0)
+    ctx.fillStyle = strokeColor
+    ctx.fillRect(labelX, labelY, textWidth + padX * 2, SELECTION_TAG_HEIGHT)
+    ctx.fillStyle = '#ffffff'
+    ctx.fillText(labelText, labelX + padX, labelY + 13)
+    ctx.restore()
+  })
+
   ownersByObjectKey.forEach((owners, objectKey) => {
     const graphic = canvasStore.graphics.find((item) => item.objectKey === objectKey)
     if (!graphic) {
@@ -3096,6 +3377,38 @@ const drawRemoteSelections = (ctx: CanvasRenderingContext2D) => {
   ctx.restore()
 }
 
+const hasActiveCanvasInteraction = (): boolean => {
+  return (
+    panState.value.active ||
+    groupRotateState.value.active ||
+    groupResizeState.value.active ||
+    rotateState.value.active ||
+    resizeState.value.active ||
+    dragMove.value.active ||
+    multiDrag.value.active ||
+    selectionRect.value.active ||
+    draft.value.active
+  )
+}
+
+const intersectsViewport = (
+  bounds: { x: number; y: number; width: number; height: number },
+  view: { left: number; top: number; right: number; bottom: number },
+  margin = VIEWPORT_CULL_MARGIN,
+): boolean => {
+  const left = bounds.x - margin
+  const top = bounds.y - margin
+  const right = bounds.x + bounds.width + margin
+  const bottom = bounds.y + bounds.height + margin
+  if (right < view.left || left > view.right) {
+    return false
+  }
+  if (bottom < view.top || top > view.bottom) {
+    return false
+  }
+  return true
+}
+
 const renderCanvas = () => {
   const canvas = canvasRef.value
   const ctx = getCtx()
@@ -3104,6 +3417,8 @@ const renderCanvas = () => {
   }
 
   ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = canvasBackgroundColor.value
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
   ctx.save()
   ctx.scale(zoomScale.value, zoomScale.value)
   ctx.translate(viewportOffset.value.x, viewportOffset.value.y)
@@ -3114,23 +3429,37 @@ const renderCanvas = () => {
   const viewTop = -viewportOffset.value.y
   const viewRight = viewLeft + worldWidth
   const viewBottom = viewTop + worldHeight
+  const viewport = {
+    left: viewLeft,
+    top: viewTop,
+    right: viewRight,
+    bottom: viewBottom,
+  }
 
   if (showGrid.value) {
-    drawGrid(ctx, viewLeft, viewTop, viewRight, viewBottom)
+    drawGrid(ctx, viewLeft, viewTop, viewRight, viewBottom, canvasBackgroundColor.value)
   }
-  sortedGraphics.value.forEach((graphic) => drawGraphic(ctx, graphic))
+  const interacting = pointerPressed.value && hasActiveCanvasInteraction()
+  const visibleGraphics = sortedGraphics.value.filter((graphic) => {
+    return intersectsViewport(getGraphicBounds(graphic), viewport)
+  })
+  visibleGraphics.forEach((graphic) => drawGraphic(ctx, graphic))
   drawPreview(ctx)
   drawSelectionRectOverlay(ctx)
   if (selectedGraphics.value.length > 1) {
     selectedGraphics.value.forEach((graphic) => drawSelectionOutlineOnly(ctx, graphic))
   }
-  drawMultiSelectionBounds(ctx)
-
+  drawMultiSelectionBounds(ctx, interacting)
   if (selectedGraphic.value && selectedGraphics.value.length <= 1) {
-    drawSelection(ctx, selectedGraphic.value)
+    if (interacting) {
+      drawSelectionOutlineOnly(ctx, selectedGraphic.value)
+    } else {
+      drawSelection(ctx, selectedGraphic.value)
+    }
   }
-  drawRemoteSelections(ctx)
-  drawRemoteCursors(ctx)
+  if (!interacting) {
+    drawRemoteSelections(ctx)
+  }
 
   ctx.restore()
 }
@@ -3560,23 +3889,6 @@ const handleWsMemberLeft = (payload: MemberJoinedData) => {
   scheduleRender()
 }
 
-const handlePresenceCursor = (payload: PresenceCursorData) => {
-  if (payload.sessionKey !== sessionKey.value) {
-    return
-  }
-  if (payload.userId === currentUserId.value) {
-    return
-  }
-  remoteCursors.value[payload.userId] = {
-    userId: payload.userId,
-    username: payload.username || `用户#${payload.userId}`,
-    x: payload.x,
-    y: payload.y,
-    updatedAt: Date.now(),
-  }
-  scheduleRender()
-}
-
 const handlePresenceSelection = (payload: PresenceSelectionData) => {
   if (payload.sessionKey !== sessionKey.value) {
     return
@@ -3732,7 +4044,7 @@ const applyOperationReplayItem = (operation: SessionOperationItemVO) => {
     width: typeof patchSource.width === 'number' ? patchSource.width : undefined,
     height: typeof patchSource.height === 'number' ? patchSource.height : undefined,
     strokeColor: typeof patchSource.strokeColor === 'string' ? patchSource.strokeColor : undefined,
-    fillColor: typeof patchSource.fillColor === 'string' ? patchSource.fillColor : undefined,
+    fillColor: typeof patchSource.fillColor === 'string' || patchSource.fillColor === null ? patchSource.fillColor : undefined,
     strokeWidth: typeof patchSource.strokeWidth === 'number' ? patchSource.strokeWidth : undefined,
     textContent: typeof patchSource.textContent === 'string' ? patchSource.textContent : undefined,
     fontSize: typeof patchSource.fontSize === 'number' ? patchSource.fontSize : undefined,
@@ -3781,7 +4093,6 @@ const bindWs = (client: WebSocketClient) => {
   client.on('member_joined', handleWsMemberJoined)
   client.on('member_left', handleWsMemberLeft)
   client.on('member_status_changed', handleMemberStatusChanged)
-  client.on('presence_cursor', handlePresenceCursor)
   client.on('presence_selection', handlePresenceSelection)
   client.on('session_paused', handleSessionPaused)
   client.on('graphic_created', handleGraphicCreated)
@@ -3803,7 +4114,6 @@ const unbindWs = (client: WebSocketClient) => {
   client.off('member_joined', handleWsMemberJoined)
   client.off('member_left', handleWsMemberLeft)
   client.off('member_status_changed', handleMemberStatusChanged)
-  client.off('presence_cursor', handlePresenceCursor)
   client.off('presence_selection', handlePresenceSelection)
   client.off('session_paused', handleSessionPaused)
   client.off('graphic_created', handleGraphicCreated)
@@ -3991,7 +4301,7 @@ const createExportCanvas = () => {
   if (!exportCtx) {
     return null
   }
-  exportCtx.fillStyle = '#ffffff'
+  exportCtx.fillStyle = canvasBackgroundColor.value
   exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height)
 
   exportCtx.save()
@@ -4005,7 +4315,7 @@ const createExportCanvas = () => {
   const viewBottom = viewTop + worldHeight
 
   if (exportIncludeGrid.value) {
-    drawGrid(exportCtx, viewLeft, viewTop, viewRight, viewBottom)
+    drawGrid(exportCtx, viewLeft, viewTop, viewRight, viewBottom, canvasBackgroundColor.value)
   }
   sortedGraphics.value.forEach((graphic) => drawGraphic(exportCtx, graphic))
   exportCtx.restore()
@@ -4122,7 +4432,7 @@ const confirmExportImage = async () => {
 
     if (exportFormat.value === 'svg') {
       const pngDataUrl = canvas.toDataURL('image/png')
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${canvas.width}" height="${canvas.height}" viewBox="0 0 ${canvas.width} ${canvas.height}"><rect width="100%" height="100%" fill="#ffffff"/><image href="${pngDataUrl}" width="${canvas.width}" height="${canvas.height}" /></svg>`
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${canvas.width}" height="${canvas.height}" viewBox="0 0 ${canvas.width} ${canvas.height}"><rect width="100%" height="100%" fill="${canvasBackgroundColor.value}"/><image href="${pngDataUrl}" width="${canvas.width}" height="${canvas.height}" /></svg>`
       const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
       downloadBlob(svgBlob, `${sessionName}_${stamp}.svg`)
       feedback.success('已导出 SVG')
@@ -4288,7 +4598,16 @@ const handleToggleFocusMode = () => {
 }
 
 const handleShowGuide = () => {
+  const availableSteps = baseOnboardingSteps.filter((step) => {
+    const element = document.querySelector(step.selector)
+    return Boolean(element)
+  })
+  onboardingSteps.value = availableSteps.length > 0 ? availableSteps : baseOnboardingSteps
   onboardingVisible.value = true
+}
+
+const handleShowBackground = () => {
+  backgroundDialogVisible.value = true
 }
 
 const handleBackToList = async () => {
@@ -4407,6 +4726,16 @@ const handleToggleGrid = () => {
   scheduleRender()
 }
 
+const applyCanvasBackgroundColor = (value: string) => {
+  const normalized = normalizeHexColor(value)
+  if (!normalized) {
+    return
+  }
+  canvasBackgroundColor.value = normalized
+  saveCanvasBackgroundColor(normalized)
+  scheduleRender()
+}
+
 const handleTogglePaused = async () => {
   if (!sessionKey.value || !canPauseCanvas.value) {
     return
@@ -4457,6 +4786,7 @@ const handleImageFileChange = async (event: Event) => {
   }
   importingImage.value = true
   try {
+    const naturalSize = await loadImageNaturalSize(file)
     const uploaded = await sessionApi.uploadSessionImage(sessionKey.value, file)
     const imageUrl = (() => {
       const raw = (uploaded.url || '').trim()
@@ -4466,14 +4796,18 @@ const handleImageFileChange = async (event: Event) => {
       if (/^https?:\/\//i.test(raw) || raw.startsWith('data:') || raw.startsWith('blob:')) {
         return raw
       }
+      const apiOrigin = getApiOrigin()
       if (raw.startsWith('/')) {
-        return `${window.location.origin}${raw}`
+        return `${apiOrigin}${raw}`
       }
-      return `${window.location.origin}/${raw}`
+      return `${apiOrigin}/${raw}`
     })()
     if (!imageUrl) {
       throw new Error('上传成功但图片地址为空')
     }
+    const initialSize = naturalSize
+      ? resolveImageInsertSize(naturalSize.width, naturalSize.height)
+      : { width: IMAGE_INSERT_BOX_WIDTH, height: IMAGE_INSERT_BOX_HEIGHT }
     const point = pickImageInsertPoint()
     const graphic: GraphicVO = {
       id: 0,
@@ -4482,8 +4816,8 @@ const handleImageFileChange = async (event: Event) => {
       objectType: 'image',
       positionX: point.x,
       positionY: point.y,
-      width: 240,
-      height: 180,
+      width: initialSize.width,
+      height: initialSize.height,
       strokeColor: '#94a3b8',
       lineStyle: 'solid',
       fillColor: null,
@@ -5075,7 +5409,7 @@ const applyReplayToCanvas = async (targetVersion: number) => {
         height: typeof patch.height === 'number' ? patch.height : current.height,
         strokeColor: typeof patch.strokeColor === 'string' ? patch.strokeColor : current.strokeColor,
         lineStyle: patch.lineStyle === 'dashed' ? 'dashed' : (patch.lineStyle === 'solid' ? 'solid' : current.lineStyle),
-        fillColor: typeof patch.fillColor === 'string' ? patch.fillColor : current.fillColor,
+        fillColor: typeof patch.fillColor === 'string' || patch.fillColor === null ? patch.fillColor : current.fillColor,
         strokeWidth: typeof patch.strokeWidth === 'number' ? patch.strokeWidth : current.strokeWidth,
         textContent: typeof patch.textContent === 'string' ? patch.textContent : current.textContent,
         fontSize: typeof patch.fontSize === 'number' ? patch.fontSize : current.fontSize,
@@ -5221,8 +5555,6 @@ const sendDeleteGraphicByObjectKey = (objectKey: string) => {
   if (isGraphicCreatePending(objectKey)) {
     enqueueDeferredObjectOperation(objectKey, { type: 'delete' })
     removeGraphic(objectKey)
-    clearGraphicCreatePending(objectKey)
-    clearDeferredObjectOperations(objectKey)
     return true
   }
   const operationId = nextOperationId('delete_graphic', objectKey)
@@ -5542,6 +5874,7 @@ const handleMouseDown = (event: MouseEvent) => {
   if (textEditing.value) {
     return
   }
+  pointerPressed.value = true
 
   if (panMode.value) {
     panState.value = {
@@ -5643,7 +5976,7 @@ const handleMouseDown = (event: MouseEvent) => {
         scheduleRender()
         return
       }
-      const handle = hitResizeHandle(point, selected)
+      const handle = selected.isLocked ? null : hitResizeHandle(point, selected)
       if (handle) {
         resizeState.value = {
           active: true,
@@ -5801,24 +6134,30 @@ const handleMouseMove = (event: MouseEvent) => {
     return
   }
 
-  const point = toCanvasPoint(event)
-  if (!point) {
-    return
-  }
-
   if (isReadOnly.value) {
     return
   }
 
+  if (!hasActiveCanvasInteraction()) {
+    return
+  }
+
+  const point = toCanvasPoint(event)
+  if (!point) {
+    return
+  }
+  broadcastCursorPresence(point)
+
   if (groupRotateState.value.active && selectedObjectKeys.value.length > 1) {
     const angle = Math.atan2(point.y - groupRotateState.value.center.y, point.x - groupRotateState.value.center.x)
     const delta = angle - groupRotateState.value.startAngle
+    const indexByObjectKey = new Map(canvasStore.graphics.map((item, index) => [item.objectKey, index]))
     selectedObjectKeys.value.forEach((objectKey) => {
       const original = groupRotateState.value.originalGraphics[objectKey]
       if (!original || original.isLocked) {
         return
       }
-      const index = canvasStore.graphics.findIndex((item) => item.objectKey === objectKey)
+      const index = indexByObjectKey.get(objectKey) ?? -1
       if (index === -1) {
         return
       }
@@ -5835,12 +6174,13 @@ const handleMouseMove = (event: MouseEvent) => {
       return
     }
     const targetBounds = resizeBoundsByHandle(sourceBounds, handle, point)
+    const indexByObjectKey = new Map(canvasStore.graphics.map((item, index) => [item.objectKey, index]))
     selectedObjectKeys.value.forEach((objectKey) => {
       const original = groupResizeState.value.originalGraphics[objectKey]
       if (!original || original.isLocked) {
         return
       }
-      const index = canvasStore.graphics.findIndex((item) => item.objectKey === objectKey)
+      const index = indexByObjectKey.get(objectKey) ?? -1
       if (index === -1) {
         return
       }
@@ -5949,8 +6289,9 @@ const handleMouseMove = (event: MouseEvent) => {
   if (multiDrag.value.active && activeTool.value === 'select') {
     const dx = point.x - multiDrag.value.start.x
     const dy = point.y - multiDrag.value.start.y
+    const indexByObjectKey = new Map(canvasStore.graphics.map((item, index) => [item.objectKey, index]))
     multiDrag.value.objectKeys.forEach((objectKey) => {
-      const index = canvasStore.graphics.findIndex((item) => item.objectKey === objectKey)
+      const index = indexByObjectKey.get(objectKey) ?? -1
       const base = multiDrag.value.baseByKey[objectKey]
       if (index === -1 || !base) {
         return
@@ -5996,6 +6337,7 @@ const handleMouseMove = (event: MouseEvent) => {
 }
 
 const handleMouseUp = () => {
+  pointerPressed.value = false
   window.setTimeout(() => {
     broadcastSelectionPresence(true)
   }, 0)
@@ -6070,6 +6412,7 @@ const handleMouseUp = () => {
     endPatchBatch()
     groupRotateState.value.active = false
     groupRotateState.value.originalGraphics = {}
+    scheduleRender()
     return
   }
 
@@ -6110,6 +6453,7 @@ const handleMouseUp = () => {
     groupResizeState.value.handle = null
     groupResizeState.value.originalBounds = null
     groupResizeState.value.originalGraphics = {}
+    scheduleRender()
     return
   }
 
@@ -6145,6 +6489,7 @@ const handleMouseUp = () => {
     rotateState.value.active = false
     rotateState.value.objectKey = ''
     rotateState.value.originalGraphic = null
+    scheduleRender()
     return
   }
 
@@ -6174,6 +6519,7 @@ const handleMouseUp = () => {
       })
     }
     resizeState.value.originalGraphic = null
+    scheduleRender()
     return
   }
 
@@ -6204,6 +6550,7 @@ const handleMouseUp = () => {
     }
     dragMove.value.basePathPoints = null
     dragMove.value.originalGraphic = null
+    scheduleRender()
     return
   }
 
@@ -6239,6 +6586,7 @@ const handleMouseUp = () => {
     multiDrag.value.active = false
     multiDrag.value.objectKeys = []
     multiDrag.value.baseByKey = {}
+    scheduleRender()
     return
   }
 
@@ -6272,6 +6620,7 @@ const handleMouseUp = () => {
 }
 
 const handleMouseLeave = () => {
+  pointerPressed.value = false
   if (panState.value.active) {
     panState.value.active = false
   }
@@ -6741,6 +7090,7 @@ watch(
 
 onMounted(async () => {
   loadOrCreateClientId()
+  loadCanvasBackgroundColor()
   window.addEventListener('keydown', handleKeydown)
   document.addEventListener('visibilitychange', onVisibilityChange)
 
@@ -6799,6 +7149,7 @@ onBeforeUnmount(() => {
       :can-pause-canvas="canPauseCanvas"
       :is-paused="isPaused"
       :show-grid="showGrid"
+      :background-color="canvasBackgroundColor"
       :focus-mode="focusMode"
       :user-avatar="authStore.user?.avatar"
       @update:session-name="handleUpdateSessionName"
@@ -6814,6 +7165,7 @@ onBeforeUnmount(() => {
       @show-shortcuts="handleShowShortcuts"
       @toggle-focus-mode="handleToggleFocusMode"
       @show-guide="handleShowGuide"
+      @show-background="handleShowBackground"
       @close-session="handleCloseSession"
       @leave="handleLeaveSession"
       @delete-session="handleDeleteSession"
@@ -7029,6 +7381,38 @@ onBeforeUnmount(() => {
       <template #footer>
         <el-button @click="exportDialogVisible = false">取消</el-button>
         <el-button type="primary" @click="confirmExportImage">导出</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="backgroundDialogVisible" title="画布背景" width="420px">
+      <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px;">
+        <button
+          v-for="color in canvasBackgroundPresets"
+          :key="color"
+          type="button"
+          :title="color"
+          :style="{
+            width: '100%',
+            height: '34px',
+            borderRadius: '8px',
+            border: canvasBackgroundColor === color ? '2px solid #2563eb' : '1px solid #d1d5db',
+            background: color,
+            cursor: 'pointer',
+          }"
+          @click="applyCanvasBackgroundColor(color)"
+        ></button>
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <span style="font-size: 13px; color: #475569;">自定义颜色</span>
+        <el-color-picker
+          :model-value="canvasBackgroundColor"
+          color-format="hex"
+          @change="(value: string | null) => value && applyCanvasBackgroundColor(String(value))"
+        />
+        <span style="font-size: 12px; color: #64748b;">当前：{{ canvasBackgroundColor }}</span>
+      </div>
+      <template #footer>
+        <el-button @click="backgroundDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
