@@ -1166,6 +1166,17 @@ const getGraphicCenter = (graphic: GraphicVO): Point => {
   if (graphic.objectType === 'circle') {
     return { x: graphic.positionX, y: graphic.positionY }
   }
+  if (graphic.objectType === 'path' && !isArrowPathGraphic(graphic)) {
+    const outline = getPathSelectionOutlinePoints(graphic)
+    const a = outline[0]
+    const c = outline[2]
+    if (a && c) {
+      return {
+        x: (a.x + c.x) / 2,
+        y: (a.y + c.y) / 2,
+      }
+    }
+  }
   const bounds = getGraphicBounds(graphic)
   return {
     x: bounds.x + bounds.width / 2,
@@ -1202,6 +1213,9 @@ const getLocalResizeBounds = (graphic: GraphicVO) => {
 }
 
 const getSelectionOutlinePoints = (graphic: GraphicVO): Point[] => {
+  if (graphic.objectType === 'path' && !isArrowPathGraphic(graphic)) {
+    return getPathSelectionOutlinePoints(graphic)
+  }
   const local = getLocalResizeBounds(graphic)
   const center = getGraphicCenter(graphic)
   const rotation = getGraphicSelectionRotationRad(graphic)
@@ -1447,10 +1461,57 @@ const getGraphicSelectionRotationRad = (graphic: GraphicVO): number => {
   if (graphic.objectType !== 'path') {
     return explicit
   }
+  // path 在用户发生旋转后会同步写入 rotation，优先使用显式角度可避免
+  // 拉伸过程中对 pathPoints 重新估算角度导致手柄跳变。
   if (Math.abs(explicit) > 1e-6) {
     return explicit
   }
   return estimatePathRotationRad(graphic.pathPoints ?? [])
+}
+
+const rotatePointByAngle = (point: Point, angle: number): Point => {
+  const cos = Math.cos(angle)
+  const sin = Math.sin(angle)
+  return {
+    x: point.x * cos - point.y * sin,
+    y: point.x * sin + point.y * cos,
+  }
+}
+
+const getPathSelectionOutlinePoints = (graphic: GraphicVO): Point[] => {
+  const points = graphic.pathPoints ?? []
+  if (points.length < 2) {
+    return []
+  }
+  const normalized = [...points]
+  if (normalized.length >= 3) {
+    const first = normalized[0]
+    const last = normalized[normalized.length - 1]
+    if (first && last && Math.hypot(first.x - last.x, first.y - last.y) <= PATH_CLOSE_DISTANCE) {
+      normalized.pop()
+    }
+  }
+  if (normalized.length < 2) {
+    return []
+  }
+
+  const rotation = getGraphicSelectionRotationRad(graphic)
+  const localPoints = normalized.map((point) => rotatePointByAngle(point, -rotation))
+  const xs = localPoints.map((p) => p.x)
+  const ys = localPoints.map((p) => p.y)
+  const minX = Math.min(...xs)
+  const maxX = Math.max(...xs)
+  const minY = Math.min(...ys)
+  const maxY = Math.max(...ys)
+  // 给 path 选框增加留白，保证多边形顶点落在框内而非贴边/越界。
+  const padding = Math.max(3, graphic.strokeWidth / 2 + 1)
+  const localCorners: Point[] = [
+    { x: minX - padding, y: minY - padding },
+    { x: maxX + padding, y: minY - padding },
+    { x: maxX + padding, y: maxY + padding },
+    { x: minX - padding, y: maxY + padding },
+  ]
+  return localCorners.map((corner) => rotatePointByAngle(corner, rotation))
 }
 
 const pointInGraphic = (point: Point, graphic: GraphicVO): boolean => {
@@ -2136,6 +2197,25 @@ const getRectIntersectionArea = (
 }
 
 const getResizeHandlePoints = (graphic: GraphicVO): Record<ResizeHandleKey, Point> => {
+  if (graphic.objectType === 'path' && !isArrowPathGraphic(graphic)) {
+    const outline = getPathSelectionOutlinePoints(graphic)
+    const nw = outline[0]
+    const ne = outline[1]
+    const se = outline[2]
+    const sw = outline[3]
+    if (nw && ne && se && sw) {
+      return {
+        n: { x: (nw.x + ne.x) / 2, y: (nw.y + ne.y) / 2 },
+        s: { x: (sw.x + se.x) / 2, y: (sw.y + se.y) / 2 },
+        e: { x: (ne.x + se.x) / 2, y: (ne.y + se.y) / 2 },
+        w: { x: (nw.x + sw.x) / 2, y: (nw.y + sw.y) / 2 },
+        nw,
+        ne,
+        sw,
+        se,
+      }
+    }
+  }
   const local = getLocalResizeBounds(graphic)
   const rotation = getGraphicSelectionRotationRad(graphic)
   const center = getGraphicCenter(graphic)
@@ -6037,7 +6117,28 @@ const handleMouseUp = () => {
     const index = canvasStore.graphics.findIndex((item) => item.objectKey === rotateState.value.objectKey)
     if (index !== -1) {
       const current = canvasStore.graphics[index]
-      if (current && current.rotation !== rotateState.value.originalRotation) {
+      const original = rotateState.value.originalGraphic
+      if (current && original) {
+        const pathChanged =
+          JSON.stringify(current.pathPoints ?? null) !== JSON.stringify(original.pathPoints ?? null)
+        if (
+          current.rotation !== original.rotation ||
+          current.positionX !== original.positionX ||
+          current.positionY !== original.positionY ||
+          pathChanged
+        ) {
+          sendUpdateGraphicPatch(current.objectKey, {
+            rotation: current.rotation,
+            ...(current.objectType === 'path'
+              ? {
+                  positionX: current.positionX,
+                  positionY: current.positionY,
+                  ...(Array.isArray(current.pathPoints) ? { pathPoints: current.pathPoints } : {}),
+                }
+              : {}),
+          })
+        }
+      } else if (current && current.rotation !== rotateState.value.originalRotation) {
         sendUpdateGraphicPatch(current.objectKey, { rotation: current.rotation })
       }
     }
