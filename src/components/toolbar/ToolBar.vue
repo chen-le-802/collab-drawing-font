@@ -201,29 +201,29 @@ onBeforeUnmount(() => {
 <template>
   <aside class="toolbar-wrap" :class="{ 'toolbar-wrap-horizontal': layout === 'horizontal' }" data-guide="toolbar">
     <div class="tools">
-      <button class="tool-btn" :class="{ active: activeTool === 'select' }" @click="setTool('select')" title="选择 (V)">
+      <button class="tool-btn" :class="{ active: activeTool === 'select' }" :disabled="readOnly" @click="setTool('select')" title="选择 (V)">
         <el-icon><Pointer /></el-icon>
       </button>
       <button class="tool-btn" :class="{ active: panMode }" @click="$emit('update:panMode', !panMode)" title="平移 (H)">
         <el-icon><Rank /></el-icon>
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'line' }" @click="setTool('line')" title="直线 (L)">
+      <button class="tool-btn" :class="{ active: activeTool === 'line' }" :disabled="readOnly" @click="setTool('line')" title="直线 (L)">
         <el-icon><Minus /></el-icon>
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'arrow' }" @click="setTool('arrow')" title="箭头">
+      <button class="tool-btn" :class="{ active: activeTool === 'arrow' }" :disabled="readOnly" @click="setTool('arrow')" title="箭头">
         <span class="arrow-icon"></span>
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'rect' }" @click="setTool('rect')" title="矩形 (R)">
+      <button class="tool-btn" :class="{ active: activeTool === 'rect' }" :disabled="readOnly" @click="setTool('rect')" title="矩形 (R)">
         <span class="rect-icon"></span>
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'circle' }" @click="setTool('circle')" title="圆形 (O)">
+      <button class="tool-btn" :class="{ active: activeTool === 'circle' }" :disabled="readOnly" @click="setTool('circle')" title="圆形 (O)">
         <span class="circle-icon"></span>
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'ellipse' }" @click="setTool('ellipse')" title="椭圆 (E)">
+      <button class="tool-btn" :class="{ active: activeTool === 'ellipse' }" :disabled="readOnly" @click="setTool('ellipse')" title="椭圆 (E)">
         <span class="ellipse-icon"></span>
       </button>
       <div class="shape-tool-wrap" ref="shapeToolWrapRef">
-        <button ref="shapeTriggerRef" class="tool-btn" :class="{ active: activeTool === 'shape' }" @click="toggleShapePicker" title="图形">
+        <button ref="shapeTriggerRef" class="tool-btn" :class="{ active: activeTool === 'shape' }" :disabled="readOnly" @click="toggleShapePicker" title="图形">
           <svg class="shape-tool-icon" viewBox="0 0 20 20" aria-hidden="true">
             <circle cx="5.4" cy="12.8" r="2.8" fill="currentColor" />
             <rect x="8.4" y="10.2" width="4.6" height="4.6" rx="0.8" fill="currentColor" />
@@ -231,10 +231,10 @@ onBeforeUnmount(() => {
           </svg>
         </button>
       </div>
-      <button class="tool-btn" :class="{ active: activeTool === 'text' }" @click="setTool('text')" title="文本 (T)">
+      <button class="tool-btn" :class="{ active: activeTool === 'text' }" :disabled="readOnly" @click="setTool('text')" title="文本 (T)">
         <span class="text-icon">A</span>
       </button>
-      <button class="tool-btn" :class="{ active: activeTool === 'brush' }" @click="setTool('brush')" title="画笔 (B)">
+      <button class="tool-btn" :class="{ active: activeTool === 'brush' }" :disabled="readOnly" @click="setTool('brush')" title="画笔 (B)">
         <el-icon><EditPen /></el-icon>
       </button>
       <button class="tool-btn" :disabled="readOnly || importingImage" @click="$emit('importImage')" :title="importingImage ? '图片上传中…' : '导入图片'">
@@ -493,6 +493,18 @@ onBeforeUnmount(() => {
   color: var(--cd-primary);
 }
 
+.tool-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.tool-btn:disabled:hover {
+  border-color: transparent;
+  background: #f8f9fc;
+  color: var(--cd-text-secondary);
+}
+
 .tool-btn.active {
   background: #202331;
   border-color: #202331;
@@ -639,6 +651,17 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
+.width-chip:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.width-chip:disabled:hover {
+  border-color: var(--cd-border);
+  background: var(--cd-bg-card);
+  color: var(--cd-text-secondary);
+}
+
 .style-chip {
   flex: 1;
   height: 26px;
@@ -661,6 +684,17 @@ onBeforeUnmount(() => {
   color: #ffffff;
   background: #202331;
   font-weight: 600;
+}
+
+.style-chip:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.style-chip:disabled:hover {
+  border-color: var(--cd-border);
+  background: var(--cd-bg-card);
+  color: var(--cd-text-secondary);
 }
 
 .action-row {

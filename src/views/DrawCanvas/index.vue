@@ -294,6 +294,7 @@ const snapshots = ref<SessionSnapshotItemVO[]>([])
 const currentSnapshotVersion = ref<number | null>(null)
 const conflictTechnicalExpandedIds = ref<number[]>([])
 const loadingConflictLogs = ref(false)
+const pausedByOperator = ref('')
 const loadingSnapshots = ref(false)
 const replayLoading = ref(false)
 const replayTargetVersion = ref<number | null>(null)
@@ -626,6 +627,21 @@ const canManageMembers = computed(() => myRole.value >= 2)
 const canPauseCanvas = computed(() => myRole.value >= 2)
 const isPaused = computed(() => sessionDetail.value?.isPaused === true)
 const isReadOnly = computed(() => isPaused.value || myRole.value <= 0)
+const readOnlyHintText = computed(() => {
+  if (!isReadOnly.value) {
+    return ''
+  }
+  if (isPaused.value) {
+    const operator = pausedByOperator.value.trim()
+    return operator
+      ? `画布已被 ${operator} 暂停，你当前仅可查看与平移。`
+      : '画布已暂停，你当前仅可查看与平移。'
+  }
+  if (myRole.value <= 0) {
+    return '你当前权限为只读，暂无编辑权限。'
+  }
+  return '当前为只读模式。'
+})
 const canManageRoles = computed(() => myRole.value >= 2)
 const canRemoveMembers = computed(() => myRole.value >= 2)
 const canCreateSnapshot = computed(() => myRole.value >= 1)
@@ -664,10 +680,32 @@ const CURSOR_IDLE_KEEPALIVE_MS = 10_000
 const REMOTE_CURSOR_STALE_MS = 12_000
 const REMOTE_SELECTION_STALE_MS = 45_000
 const CANVAS_BACKGROUND_KEY = 'collab_canvas_background_v1'
+const ONBOARDING_SEEN_KEY_PREFIX = 'collab_canvas_onboarding_seen_v1'
 const canvasBackgroundPresets = ['#ffffff', '#f8fafc', '#f6f7fb', '#fefce8', '#f0fdf4', '#eef2ff', '#fff1f2', '#f5f3ff']
 const imageElementCache = new Map<string, HTMLImageElement>()
 const imageFallbackLoading = new Set<string>()
 const imageObjectUrlBySource = new Map<string, string>()
+
+const getOnboardingSeenKey = () => {
+  const userId = currentUserId.value ?? authStore.user?.userId ?? 0
+  return `${ONBOARDING_SEEN_KEY_PREFIX}:${userId}`
+}
+
+const hasSeenOnboarding = (): boolean => {
+  try {
+    return localStorage.getItem(getOnboardingSeenKey()) === '1'
+  } catch {
+    return false
+  }
+}
+
+const markOnboardingSeen = () => {
+  try {
+    localStorage.setItem(getOnboardingSeenKey(), '1')
+  } catch {
+    // ignore localStorage error
+  }
+}
 
 const getWsUrl = (): string => {
   const baseApi = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000/api/'
@@ -2889,19 +2927,34 @@ const updateGraphicByResize = (
   }
 
   if (base.objectType === 'path') {
-    const targetBounds = resizeBoundsByHandle(bounds, handle, movingLocal)
-    if (!rotation) {
-      return applyTransformToGraphic(base, bounds, targetBounds)
-    }
-    const sx = bounds.width === 0 ? 1 : targetBounds.width / bounds.width
-    const sy = bounds.height === 0 ? 1 : targetBounds.height / bounds.height
     const basePathPoints = base.pathPoints ?? []
-    const localPathPoints = basePathPoints.map((point) => rotatePointAround(point, center, -rotation))
+    if (basePathPoints.length === 0) {
+      return base
+    }
+    const outline = getPathSelectionOutlinePoints(base)
+    const sourceBounds = (() => {
+      if (outline.length === 4) {
+        const localOutline = outline.map((point) => toLocal(point))
+        const xs = localOutline.map((point) => point.x)
+        const ys = localOutline.map((point) => point.y)
+        return {
+          x: Math.min(...xs),
+          y: Math.min(...ys),
+          width: Math.max(RESIZE_MIN_SIZE, Math.max(...xs) - Math.min(...xs)),
+          height: Math.max(RESIZE_MIN_SIZE, Math.max(...ys) - Math.min(...ys)),
+        }
+      }
+      return bounds
+    })()
+    const targetBounds = resizeBoundsByHandle(sourceBounds, handle, movingLocal)
+    const sx = sourceBounds.width === 0 ? 1 : targetBounds.width / sourceBounds.width
+    const sy = sourceBounds.height === 0 ? 1 : targetBounds.height / sourceBounds.height
+    const localPathPoints = basePathPoints.map((point) => toLocal(point))
     const nextLocalPathPoints = localPathPoints.map((point) => ({
-      x: targetBounds.x + (point.x - bounds.x) * sx,
-      y: targetBounds.y + (point.y - bounds.y) * sy,
+      x: targetBounds.x + (point.x - sourceBounds.x) * sx,
+      y: targetBounds.y + (point.y - sourceBounds.y) * sy,
     }))
-    const nextPathPoints = nextLocalPathPoints.map((point) => rotatePointAround(point, center, rotation))
+    const nextPathPoints = nextLocalPathPoints.map((point) => toWorld(point))
     const xs = nextPathPoints.map((point) => point.x)
     const ys = nextPathPoints.map((point) => point.y)
     const nextBounds = {
@@ -3924,6 +3977,7 @@ const handleSessionPaused = (payload: SessionPausedData) => {
     isPaused: payload.isPaused,
   }
   const operator = payload.operatorUsername || (typeof payload.operatorUserId === 'number' ? `用户#${payload.operatorUserId}` : '系统')
+  pausedByOperator.value = payload.isPaused ? operator : ''
   feedback.info(`${operator}${payload.isPaused ? '暂停了画布' : '恢复了画布'}`)
   scheduleRender()
 }
@@ -4606,6 +4660,16 @@ const handleShowGuide = () => {
   onboardingVisible.value = true
 }
 
+const tryOpenOnboardingOnFirstVisit = () => {
+  if (hasSeenOnboarding()) {
+    return
+  }
+  nextTick(() => {
+    handleShowGuide()
+    markOnboardingSeen()
+  })
+}
+
 const handleShowBackground = () => {
   backgroundDialogVisible.value = true
 }
@@ -4749,6 +4813,7 @@ const handleTogglePaused = async () => {
         isPaused: result.isPaused,
       }
     }
+    pausedByOperator.value = result.isPaused ? (authStore.user?.username || '管理员') : ''
     feedback.success(result.isPaused ? '画布已暂停' : '画布已恢复')
   } catch (error) {
     feedback.errorFrom(error, '更新画布状态失败')
@@ -4938,7 +5003,7 @@ const locateHistoryObject = (item: OperationHistoryItem) => {
     focusedObjectKey.value = null
     focusHighlightTimer = null
     scheduleRender()
-  }, 1200)
+  }, 3000)
   scheduleRender()
 }
 
@@ -4956,6 +5021,7 @@ const locateTimelineObject = (item: SessionOperationItemVO) => {
 }
 
 const locateConflictObject = (item: SessionConflictLogItemVO) => {
+  const fields = item.fieldName ? [formatFieldNameLabel(item.fieldName)] : []
   locateHistoryObject({
     id: `conflict_${item.id}`,
     operationType: 'update_graphic',
@@ -4966,6 +5032,14 @@ const locateConflictObject = (item: SessionConflictLogItemVO) => {
     timestamp: Date.now(),
     timeText: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
   })
+  if (canvasStore.graphics.some((graphic) => graphic.objectKey === item.objectKey)) {
+    conflictFocusMap.value[item.objectKey] = {
+      fields,
+      updatedAt: Date.now(),
+    }
+    conflictHistoryVisible.value = false
+    scheduleRender()
+  }
 }
 
 const pushOperationHistory = (payload: {
@@ -5240,8 +5314,8 @@ const refreshConflictLogs = async (forceFromStart = false) => {
   }
 }
 
-const refreshSnapshots = async () => {
-  if (!sessionKey.value || loadingSnapshots.value) {
+const refreshSnapshots = async (force = false) => {
+  if (!sessionKey.value || (loadingSnapshots.value && !force)) {
     return
   }
   loadingSnapshots.value = true
@@ -5284,7 +5358,7 @@ const createSnapshotNow = async () => {
     loadingSnapshots.value = true
     await sessionApi.createSnapshot(sessionKey.value, snapshotName || undefined)
     feedback.success('已创建版本快照')
-    await refreshSnapshots()
+    await refreshSnapshots(true)
   } catch (error) {
     feedback.errorFrom(error, '创建快照失败')
   } finally {
@@ -6341,15 +6415,14 @@ const handleMouseUp = () => {
   window.setTimeout(() => {
     broadcastSelectionPresence(true)
   }, 0)
+  if (panState.value.active) {
+    panState.value.active = false
+  }
   if (isReadOnly.value) {
     if (selectionRect.value.active) {
       selectionRect.value.active = false
       scheduleRender()
     }
-    return
-  }
-  if (panState.value.active) {
-    panState.value.active = false
     return
   }
 
@@ -6397,6 +6470,8 @@ const handleMouseUp = () => {
       if (
         current.positionX !== original.positionX ||
         current.positionY !== original.positionY ||
+        current.width !== original.width ||
+        current.height !== original.height ||
         current.rotation !== original.rotation ||
         JSON.stringify(current.pathPoints ?? null) !== JSON.stringify(original.pathPoints ?? null)
       ) {
@@ -6405,6 +6480,12 @@ const handleMouseUp = () => {
           positionY: current.positionY,
           rotation: current.rotation,
           ...(Array.isArray(current.pathPoints) ? { pathPoints: current.pathPoints } : {}),
+          ...(current.objectType === 'line'
+            ? {
+                ...(typeof current.width === 'number' ? { width: current.width } : {}),
+                ...(typeof current.height === 'number' ? { height: current.height } : {}),
+              }
+            : {}),
         })
       }
     })
@@ -6469,6 +6550,8 @@ const handleMouseUp = () => {
           current.rotation !== original.rotation ||
           current.positionX !== original.positionX ||
           current.positionY !== original.positionY ||
+          current.width !== original.width ||
+          current.height !== original.height ||
           pathChanged
         ) {
           sendUpdateGraphicPatch(current.objectKey, {
@@ -6480,10 +6563,28 @@ const handleMouseUp = () => {
                   ...(Array.isArray(current.pathPoints) ? { pathPoints: current.pathPoints } : {}),
                 }
               : {}),
+            ...(current.objectType === 'line'
+              ? {
+                  positionX: current.positionX,
+                  positionY: current.positionY,
+                  ...(typeof current.width === 'number' ? { width: current.width } : {}),
+                  ...(typeof current.height === 'number' ? { height: current.height } : {}),
+                }
+              : {}),
           })
         }
       } else if (current && current.rotation !== rotateState.value.originalRotation) {
-        sendUpdateGraphicPatch(current.objectKey, { rotation: current.rotation })
+        sendUpdateGraphicPatch(current.objectKey, {
+          rotation: current.rotation,
+          ...(current.objectType === 'line'
+            ? {
+                positionX: current.positionX,
+                positionY: current.positionY,
+                ...(typeof current.width === 'number' ? { width: current.width } : {}),
+                ...(typeof current.height === 'number' ? { height: current.height } : {}),
+              }
+            : {}),
+        })
       }
     }
     rotateState.value.active = false
@@ -7102,6 +7203,7 @@ onMounted(async () => {
   clientVersionRef.value = currentVersion.value
   serverVersionRef.value = currentVersion.value
   lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  tryOpenOnboardingOnFirstVisit()
   scheduleRender()
 })
 
@@ -7177,6 +7279,9 @@ onBeforeUnmount(() => {
       </span>
       <span v-else>重连失败（已尝试 {{ reconnectAttempt }}/{{ reconnectMaxAttempts }} 次）</span>
       <el-button v-if="reconnectFailed" type="warning" size="small" @click="handleRetryConnect">重试连接</el-button>
+    </div>
+    <div v-if="readOnlyHintText" class="readonly-bar">
+      {{ readOnlyHintText }}
     </div>
 
     <div class="draw-main" :class="{ 'focus-mode': focusMode }" v-loading="joining">
@@ -7366,8 +7471,8 @@ onBeforeUnmount(() => {
 
     <el-dialog v-model="exportDialogVisible" title="导出画布" width="420px">
       <el-radio-group v-model="exportFormat">
-        <el-radio label="png">PNG（位图）</el-radio>
-        <el-radio label="svg">SVG（矢量容器）</el-radio>
+        <el-radio label="png">PNG</el-radio>
+        <el-radio label="svg">SVG</el-radio>
         <el-radio label="pdf">PDF</el-radio>
       </el-radio-group>
       <div style="margin-top: 12px;">
