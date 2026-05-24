@@ -3,6 +3,8 @@ import { sessionApi } from '@/api/session'
 import type { GraphicVO } from '@/types/graphic'
 import type { SessionOperationItemVO } from '@/types/session'
 
+// 协作补偿同步模块：
+// 用于断线重连或版本追平场景，支持“拉图元快照”和“按操作增量回放”两种策略。
 type UseCollabReplayOptions = {
   getSessionKey: () => string
   getCurrentVersion: () => number
@@ -24,6 +26,7 @@ type UseCollabReplayOptions = {
 
 type PathPoint = { x: number; y: number }
 
+// 兼容后端历史数据中的 objectType 字段，兜底到 line。
 const toOperationGraphicType = (parseString: UseCollabReplayOptions['parseString'], value: unknown): GraphicVO['objectType'] => {
   const normalized = parseString(value, 'line')
   if (
@@ -39,6 +42,7 @@ const toOperationGraphicType = (parseString: UseCollabReplayOptions['parseString
   return 'line'
 }
 
+// 把未知 pathPoints 转为安全点数组，避免脏数据影响回放。
 const toOperationPathPoints = (
   isRecord: UseCollabReplayOptions['isRecord'],
   parseNumber: UseCollabReplayOptions['parseNumber'],
@@ -54,6 +58,7 @@ const toOperationPathPoints = (
   return points.length > 0 ? points : null
 }
 
+// 把 unknown 数据归一化为前端可用 GraphicVO。
 const toGraphicFromUnknown = (
   options: Pick<UseCollabReplayOptions, 'isRecord' | 'parseNumber' | 'parseString' | 'getSessionIdFallback'>,
   value: unknown,
@@ -93,6 +98,7 @@ const toGraphicFromUnknown = (
 }
 
 export const useCollabReplay = (options: UseCollabReplayOptions) => {
+  // 图元同步：可按版本增量拉取，也可强制全量覆盖。
   const syncGraphicsFromServer = async (forceFull = false) => {
     const sessionKey = options.getSessionKey()
     if (!sessionKey) {
@@ -114,6 +120,7 @@ export const useCollabReplay = (options: UseCollabReplayOptions) => {
     }
   }
 
+  // 重放单条操作：delete 直接删，create/update 按 resolvedResult 或 operationData 回放。
   const applyOperationReplayItem = (operation: SessionOperationItemVO) => {
     if (operation.operationType === 'delete') {
       options.removeGraphic(operation.objectKey)
@@ -156,6 +163,7 @@ export const useCollabReplay = (options: UseCollabReplayOptions) => {
     })
   }
 
+  // 操作增量回放：按 currentVersion 拉取后续操作并依次应用。
   const syncOperationsFromServer = async (): Promise<boolean> => {
     const sessionKey = options.getSessionKey()
     if (!sessionKey) {

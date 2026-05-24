@@ -36,15 +36,19 @@ import {
   type WsErrorData,
 } from './types'
 
+// 统一事件处理器类型：根据事件名自动约束 data 的类型。
 type EventHandler<K extends WebSocketClientEventType> = (
   data: WebSocketClientEventDataMap[K],
 ) => void
 
+// 内部统一存储的“弱类型”处理器，用于消息分发表。
 type AnyEventHandler = (data: unknown) => void
 
+// 连接相关默认参数。
 const RECONNECT_INTERVAL = 3000
 const MAX_RECONNECT_ATTEMPTS = 5
 const HEARTBEAT_INTERVAL = 20000
+// 白名单：仅允许识别并处理这些服务端消息类型。
 const SERVER_MESSAGE_TYPES: ReadonlySet<ServerMessageType> = new Set([
   'session_joined',
   'session_left',
@@ -64,6 +68,7 @@ const SERVER_MESSAGE_TYPES: ReadonlySet<ServerMessageType> = new Set([
   'pong',
 ])
 
+// 运行时类型守卫与基础转换工具，用于消息归一化。
 const isObject = (value: unknown): value is Record<string, unknown> => {
   return typeof value === 'object' && value !== null
 }
@@ -150,6 +155,10 @@ const isServerMessageType = (value: string): value is ServerMessageType => {
   return SERVER_MESSAGE_TYPES.has(value as ServerMessageType)
 }
 
+// WebSocket 客户端封装：
+// 1) 管理连接/重连/心跳
+// 2) 提供业务消息发送方法
+// 3) 统一解析并归一化服务端消息后对外分发事件
 export class WebSocketClient {
   private ws: WebSocket | null = null
   private url: string
@@ -170,6 +179,7 @@ export class WebSocketClient {
     this.sessionKey = sessionKey
   }
 
+  // 建立连接。若已连接或正在连接则直接返回，避免重复建连。
   connect(): void {
     if (this.connecting || this.isConnected()) {
       return
@@ -183,6 +193,7 @@ export class WebSocketClient {
     this.ws = new WebSocket(wsUrl)
 
     this.ws.onopen = () => {
+      // 建连成功后：清理重连状态、开启心跳、通知上层 connected。
       this.connecting = false
       const connectedAttempt = this.reconnectAttempts
       this.reconnectAttempts = 0
@@ -203,6 +214,7 @@ export class WebSocketClient {
     }
 
     this.ws.onclose = (event: CloseEvent) => {
+      // 统一收口断开处理：停心跳、发 disconnected、必要时进入重连。
       this.connecting = false
       this.stopHeartbeat()
       this.ws = null
@@ -221,6 +233,7 @@ export class WebSocketClient {
     }
   }
 
+  // 主动断开：标记为 manual，后续 onclose 不再触发自动重连。
   disconnect(): void {
     this.isManualClose = true
     this.connecting = false
@@ -238,9 +251,13 @@ export class WebSocketClient {
   }
 
   send<T = unknown>(type: ClientMessageType, data: T): void {
+    //普通业务消息固定走 silentWhenDisconnected=false
     this.sendInternal(type, data, false)
   }
 
+  // 底层发送函数：
+  // - silentWhenDisconnected=true：离线时静默丢弃（用于心跳 ping）
+  // - false：离线时回调 error 事件，方便 UI 给出提示
   private sendInternal<T = unknown>(type: ClientMessageType, data: T, silentWhenDisconnected: boolean): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       if (silentWhenDisconnected) {
@@ -260,9 +277,11 @@ export class WebSocketClient {
       data,
       timestamp: Date.now(),
     }
+    // 统一客户端消息协议结构后再发送。
     this.ws.send(JSON.stringify(payload))
   }
 
+  // 注册事件处理器。
   on<K extends WebSocketClientEventType>(type: K, handler: EventHandler<K>): void {
     const key = type as string
     const queue = this.messageHandlers.get(key) ?? []
@@ -270,6 +289,7 @@ export class WebSocketClient {
     this.messageHandlers.set(key, queue)
   }
 
+  // 注销事件处理器。
   off<K extends WebSocketClientEventType>(type: K, handler: EventHandler<K>): void {
     const key = type as string
     const queue = this.messageHandlers.get(key)
@@ -284,6 +304,8 @@ export class WebSocketClient {
     this.messageHandlers.set(key, filtered)
   }
 
+  // 以下为业务语义发送函数：对上层屏蔽具体 WS type 字符串。
+  // 作用：页面调用更直观，不用手写 type 字符串。
   sendCreateGraphic(data: CreateGraphicData): void {
     this.send('create_graphic', data)
   }
@@ -327,10 +349,12 @@ export class WebSocketClient {
     this.send('selection_change', data)
   }
 
+  // 连接是否处于 OPEN 状态。
   isConnected(): boolean {
     return !!this.ws && this.ws.readyState === WebSocket.OPEN
   }
 
+  // 在 ws 地址后拼接 token / sessionKey 作为握手鉴权参数。
   private buildSocketUrl(): string {
     const parsed = new URL(this.url)
     parsed.searchParams.set('token', this.token)
@@ -358,6 +382,7 @@ export class WebSocketClient {
     })
   }
 
+  // 自动重连策略：固定间隔，最多重试 maxReconnectAttempts 次。
   private tryReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       const payload: ReconnectFailedEventData = {
@@ -382,6 +407,7 @@ export class WebSocketClient {
     }, this.reconnectInterval)
   }
 
+  // 清除重连计时器。
   private clearReconnectTimer(): void {
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer)
@@ -389,6 +415,8 @@ export class WebSocketClient {
     }
   }
 
+  // 开启应用层心跳：定时发 ping 保活连接。
+ // 服务端回 pong，并用最近活动时间判断僵尸连接。
   private startHeartbeat(): void {
     this.stopHeartbeat()
     this.heartbeatTimer = window.setInterval(() => {
@@ -396,6 +424,7 @@ export class WebSocketClient {
     }, HEARTBEAT_INTERVAL)
   }
 
+  // 停止心跳。
   private stopHeartbeat(): void {
     if (this.heartbeatTimer !== null) {
       window.clearInterval(this.heartbeatTimer)
@@ -403,6 +432,12 @@ export class WebSocketClient {
     }
   }
 
+  // 接收原始文本消息并执行：
+  // 1) JSON 解析
+  // 2) 协议结构校验
+  // 3) 消息类型白名单校验
+  // 4) 调 normalizeServerMessage 归一化
+  // 5) 触发对应事件：emit(type, normalized) 分发给页面
   private handleMessage(rawText: string): void {
     let message: ServerMessage<unknown>
     try {
@@ -441,7 +476,7 @@ export class WebSocketClient {
     const normalized = this.normalizeServerMessage(type, message.data)
     this.emit(type, normalized as never)
   }
-
+  // 根据消息类型路由到具体 normalize 函数。
   private normalizeServerMessage<K extends ServerMessageType>(
     type: K,
     data: unknown,
@@ -478,10 +513,12 @@ export class WebSocketClient {
         return { timestamp: Date.now() } as ServerMessageDataMap[K]
       case 'error':
       default:
+        // error 或未覆盖分支统一走错误消息归一化。
         return this.normalizeError(data) as ServerMessageDataMap[K]
     }
   }
 
+  // session_joined：把 session_joined 统一成标准对象（session+members+graphics）。
   private normalizeSessionJoined(data: unknown) {
     const record = isObject(data) ? data : {}
     return {
@@ -496,6 +533,7 @@ export class WebSocketClient {
     }
   }
 
+  // session_left：离开会话事件。
   private normalizeSessionLeft(data: unknown) {
     const record = isObject(data) ? data : {}
     return {
@@ -503,6 +541,7 @@ export class WebSocketClient {
     }
   }
 
+  // session_paused：暂停状态广播（含操作者信息）。
   private normalizeSessionPaused(data: unknown): SessionPausedData {
     const record = (isObject(data) ? data : {}) as RawSessionPausedData
     return {
@@ -513,6 +552,7 @@ export class WebSocketClient {
     }
   }
 
+  // member_joined / member_left：成员变更事件。
   private normalizeMemberEvent(data: unknown) {
     const record = (isObject(data) ? data : {}) as RawMemberEventData
     return {
@@ -523,6 +563,7 @@ export class WebSocketClient {
     }
   }
 
+  // member_status_changed：在线状态变化事件。
   private normalizeMemberStatusChanged(data: unknown) {
     const record = (isObject(data) ? data : {}) as RawMemberEventData
     return {
@@ -534,6 +575,7 @@ export class WebSocketClient {
     }
   }
 
+  // presence_cursor：协作者光标位置。
   private normalizePresenceCursor(data: unknown): PresenceCursorData {
     const record = (isObject(data) ? data : {}) as RawPresenceCursorData
     return {
@@ -545,6 +587,7 @@ export class WebSocketClient {
     }
   }
 
+  // presence_selection：协作者当前选中对象。
   private normalizePresenceSelection(data: unknown): PresenceSelectionData {
     const record = (isObject(data) ? data : {}) as RawPresenceSelectionData
     const objectKeys = Array.isArray(record.objectKeys)
@@ -562,6 +605,7 @@ export class WebSocketClient {
     }
   }
 
+  // graphic_created：兼容“包裹结构”和“直接图元结构”两种数据形态。
   private normalizeGraphicCreated(data: RawGraphicCreatedData): GraphicCreatedData {
     const wrapped = isObject(data) ? data : {}
     const maybeGraphic = isObject(wrapped.graphic) ? wrapped.graphic : wrapped
@@ -574,6 +618,7 @@ export class WebSocketClient {
     }
   }
 
+  // graphic_updated：兼容“包裹结构”和“直接图元结构”两种数据形态。
   private normalizeGraphicUpdated(data: RawGraphicUpdatedData): GraphicUpdatedData {
     const wrapped = isObject(data) ? data : {}
     const maybeGraphic = isObject(wrapped.graphic) ? wrapped.graphic : wrapped
@@ -588,6 +633,7 @@ export class WebSocketClient {
     }
   }
 
+  // graphic_deleted：删除事件数据归一化。
   private normalizeGraphicDeleted(data: unknown): GraphicDeletedData {
     const record = isObject(data) ? data : {}
     return {
@@ -598,6 +644,7 @@ export class WebSocketClient {
     }
   }
 
+  // operation_resolved：服务端冲突裁决结果（用于前端提示和日志展示），规范conflictType/operationType。
   private normalizeOperationResolved(data: unknown) {
     const record = isObject(data) ? data : {}
     const conflictTypeRaw = toString(record.conflictType, 'none')
@@ -631,6 +678,7 @@ export class WebSocketClient {
     }
   }
 
+  // undo_result：撤销结果（兼容单条与批量返回），统一 appliedCount/canUndo/canRedo。
   private normalizeUndoResult(data: unknown) {
     const record = isObject(data) ? data : {}
     const operations = Array.isArray(record.operations)
@@ -649,6 +697,7 @@ export class WebSocketClient {
     }
   }
 
+  // redo_result：重做结果（兼容单条与批量返回）。
   private normalizeRedoResult(data: unknown) {
     const record = isObject(data) ? data : {}
     const operations = Array.isArray(record.operations)
@@ -667,6 +716,7 @@ export class WebSocketClient {
     }
   }
 
+  // error：服务端或协议层错误。
   private normalizeError(data: unknown): WsErrorData {
     const record = isObject(data) ? data : {}
     return {
@@ -676,6 +726,7 @@ export class WebSocketClient {
     }
   }
 
+  // 当服务端消息缺字段时，构造一个可渲染的兜底图元，避免前端直接崩溃。
   private buildFallbackGraphic(source: Record<string, unknown>): GraphicVO {
     const objectKey = toString(source.objectKey, '')
     return {

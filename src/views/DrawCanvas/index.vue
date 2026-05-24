@@ -1,7 +1,25 @@
 <script setup lang="ts">
+// DrawCanvas 主页面控制器：
+// 统一编排会话加入、WebSocket 协同、画布交互、历史/冲突/快照等子模块。
+//
+// 文件职责总览：
+// 1) 页面框架层：组装 TopBar / ToolBar / StatusBar / MemberPanel 与各类业务弹窗。
+// 2) 交互状态层：处理选中、框选、拖拽、缩放、旋转、绘制、文本编辑、复制粘贴。
+// 3) 渲染管线层：renderCanvas 统一执行背景/网格/图元/草稿/选择态/协作标记绘制。
+// 4) 协作同步层：管理 WS 连接、重连、心跳、版本推进、Lamport 时钟、批量操作元数据。
+// 5) 会话业务层：加入离开、成员管理、权限控制、快照恢复、操作历史和冲突日志。
+// 6) 一致性补偿层：pendingCreate + deferredQueue，保证 create 与后续 patch/delete 因果顺序。
+//
+// 主流程（从用户操作到全员同步）：
+// 鼠标事件 -> 本地草稿/变换 -> sendCreate|sendUpdate|sendDelete ->
+// 后端裁决与落库 -> WS 广播 -> handleGraphic* 回写本地 -> scheduleRender 重绘。
+//
+// 重点函数：
+// onMounted -> bindWs -> handleMouseDown -> handleMouseMove -> handleMouseUp ->
+// sendCreateGraphic/sendUpdateGraphicPatch/sendDeleteGraphicByObjectKey ->
+// handleGraphicCreated/Updated/Deleted -> renderCanvas。
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
 
 import MemberPanel from '@/components/sidebar/MemberPanel.vue'
 import StatusBar from '@/components/statusbar/StatusBar.vue'
@@ -15,20 +33,44 @@ import { useAuthStore } from '@/stores/auth'
 import { useCanvasStore } from '@/stores/canvas'
 import { generateGraphicObjectKey, type GraphicVO } from '@/types/graphic'
 import type {
-  CollaborationConflictType,
   MemberVO,
   SessionConflictLogItemVO,
   SessionDetailVO,
   SessionInviteItemVO,
   SessionJoinVO,
   SessionOperationItemVO,
-  SessionOperationType,
-  SessionOperationTimelineVO,
   SessionSnapshotItemVO,
 } from '@/types/session'
 import { storage } from '@/utils/storage'
 import { confirmDanger, feedback } from '@/utils/feedback'
 import WebSocketClient from '@/ws/client'
+import { useCanvasViewControls } from '@/views/DrawCanvas/js/useCanvasViewControls'
+import { useCanvasKeyboard } from '@/views/DrawCanvas/js/useCanvasKeyboard'
+import {
+  getArrowEndpoints,
+  getGraphicBounds as getGraphicBoundsCore,
+  getGraphicCenter as getGraphicCenterCore,
+  getGraphicSelectionRotationRad as getGraphicSelectionRotationRadCore,
+  getLocalResizeBounds as getLocalResizeBoundsCore,
+  getPathSelectionOutlinePoints as getPathSelectionOutlinePointsCore,
+  getRotatedRectBounds,
+  isArrowPathGraphic,
+  isClosedPath as isClosedPathCore,
+  isLineLikeGraphic,
+  normalizeRect,
+  rotatePoint,
+  rotatePointByAngle,
+} from '@/views/DrawCanvas/js/canvasGeometry'
+import { createCanvasTransformHelpers, type ResizeHandleKey as TransformResizeHandleKey } from '@/views/DrawCanvas/js/useCanvasTransformHelpers'
+import { createCanvasHitTestHelpers } from '@/views/DrawCanvas/js/useCanvasHitTest'
+import { createCanvasDraftHelpers } from '@/views/DrawCanvas/js/useCanvasDraftHelpers'
+import { useCanvasDrawPrimitives } from '@/views/DrawCanvas/js/useCanvasDrawPrimitives'
+import { useInviteMemberManagement } from '@/views/DrawCanvas/js/useInviteMemberManagement'
+import { useOperationHistory, type OperationHistorySource } from '@/views/DrawCanvas/js/useOperationHistory'
+import { useOperationConflictLogs } from '@/views/DrawCanvas/js/useOperationConflictLogs'
+import { useSessionJoinLeave } from '@/views/DrawCanvas/js/useSessionJoinLeave'
+import { useSessionLifecycle } from '@/views/DrawCanvas/js/useSessionLifecycle'
+import { useVersionSnapshots } from '@/views/DrawCanvas/js/useVersionSnapshots'
 import type {
   ConnectedEventData,
   DisconnectedEventData,
@@ -49,6 +91,7 @@ import type {
 } from '@/ws/types'
 import './styles.css'
 
+// 对话框按需异步加载，降低首屏体积与初次渲染压力。
 const ConflictLogDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/ConflictLogDialog.vue'))
 const InviteDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/InviteDialog.vue'))
 const MemberManageDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/MemberManageDialog.vue'))
@@ -57,6 +100,7 @@ const OperationTimelineDialog = defineAsyncComponent(() => import('@/views/DrawC
 const ShortcutHelpDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/ShortcutHelpDialog.vue'))
 const VersionHistoryDialog = defineAsyncComponent(() => import('@/views/DrawCanvas/components/VersionHistoryDialog.vue'))
 
+// 画布基础坐标点（世界坐标）。
 type Point = { x: number; y: number }
 
 interface DraftGraphic {
@@ -83,7 +127,7 @@ interface MultiDragState {
   baseByKey: Record<string, { x: number; y: number; pathPoints: Point[] | null }>
 }
 
-type ResizeHandleKey = 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se'
+type ResizeHandleKey = TransformResizeHandleKey
 
 interface ResizeState {
   active: boolean
@@ -133,20 +177,6 @@ interface GroupSelectionFrame {
   rotationRad: number
 }
 
-type OperationHistorySource = 'local' | 'remote' | 'system'
-
-interface OperationHistoryItem {
-  id: string
-  operationType: OperationVO['operationType'] | 'undo' | 'redo'
-  objectKey: string
-  userId: number | null
-  userLabel: string
-  source: OperationHistorySource
-  detail?: string
-  timestamp: number
-  timeText: string
-}
-
 interface RemoteCursorState {
   userId: number
   username: string
@@ -166,16 +196,19 @@ interface RemoteSelectionState {
 type GraphicPatch = NonNullable<import('@/ws/types').UpdateGraphicData['patch']>
 type DeferredObjectOperation = { type: 'patch'; patch: GraphicPatch } | { type: 'delete' }
 
+// 路由与全局状态入口。
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const canvasStore = useCanvasStore()
 
+// DOM 引用：画布本体、容器、专注模式浮窗。
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const canvasContainerRef = ref<HTMLDivElement | null>(null)
 const drawPageRef = ref<HTMLDivElement | null>(null)
 const focusActionsRef = ref<HTMLDivElement | null>(null)
 
+// 会话连接状态（加入、重连、同步提示）。
 const joining = ref(false)
 const joined = ref(false)
 const wsConnected = ref(false)
@@ -187,6 +220,7 @@ const reconnectDelay = ref(0)
 const reconnectTotalCount = ref(0)
 const lastSyncText = ref('-')
 
+// 会话与成员数据。
 const sessionInfo = ref<SessionJoinVO | null>(null)
 const sessionDetail = ref<SessionDetailVO | null>(null)
 const loadingMembers = ref(false)
@@ -195,6 +229,7 @@ const includeHistoryMembers = ref(false)
 const navigatingAway = ref(false)
 const currentUserId = ref<number | null>(authStore.user?.userId ?? null)
 
+// 工具栏与画布视图状态（工具、样式、缩放、平移）。
 const activeTool = ref<CanvasTool>('select')
 const shapeType = ref<ShapeToolType>('diamond')
 const strokeColor = ref('#1f2937')
@@ -212,39 +247,11 @@ const textEditorValue = ref('')
 const textEditorPoint = ref<Point>({ x: 0, y: 0 })
 const textEditorInputRef = ref<HTMLInputElement | null>(null)
 const textEditingTargetObjectKey = ref<string | null>(null)
+// 面板/弹窗可见性。
 const shortcutDialogVisible = ref(false)
 const operationHistoryVisible = ref(false)
 const conflictHistoryVisible = ref(false)
 const versionHistoryVisible = ref(false)
-const operationHistory = ref<OperationHistoryItem[]>([])
-const operationTimelineLoading = ref(false)
-const operationTimeline = ref<SessionOperationTimelineVO | null>(null)
-const operationTimelineFilterUserId = ref<number | null>(null)
-const operationTimelineFilterOperationType = ref<SessionOperationType | 'all' | 'restore'>('all')
-const operationTimelineFilterConflictType = ref<CollaborationConflictType | 'all'>('all')
-const operationTimelineFilterFromVersion = ref<number | null>(null)
-const operationTimelineFilterToVersion = ref<number | null>(null)
-const operationTimelinePage = ref(1)
-const operationTimelinePageSize = ref(20)
-const operationTimelineTechnicalExpandedIds = ref<number[]>([])
-const inviteDialogVisible = ref(false)
-const inviteDialogLoading = ref(false)
-const inviteListLoading = ref(false)
-const inviteList = ref<SessionInviteItemVO[]>([])
-const memberManageDialogVisible = ref(false)
-const shareQrcodePendingLink = ref('')
-const shareQrcodeVisible = ref(false)
-const exportDialogVisible = ref(false)
-const exportFormat = ref<'png' | 'svg' | 'pdf'>('png')
-const exportIncludeGrid = ref(true)
-const showGrid = ref(true)
-const backgroundDialogVisible = ref(false)
-const canvasBackgroundColor = ref('#ffffff')
-const focusMode = ref(false)
-const focusActionsPos = ref<Point>({ x: 16, y: 68 })
-const focusActionsCollapsed = ref(false)
-const focusActionsDragging = ref(false)
-const focusActionsDragOffset = ref<Point>({ x: 0, y: 0 })
 const technicalMode = ref(false)
 const onboardingVisible = ref(false)
 const baseOnboardingSteps: GuideStep[] = [
@@ -287,18 +294,16 @@ const baseOnboardingSteps: GuideStep[] = [
   },
 ]
 const onboardingSteps = ref<GuideStep[]>(baseOnboardingSteps)
+// 快照与会话运行附加状态。
 const importingImage = ref(false)
 const imageFileInputRef = ref<HTMLInputElement | null>(null)
-const conflictLogs = ref<SessionConflictLogItemVO[]>([])
 const snapshots = ref<SessionSnapshotItemVO[]>([])
 const currentSnapshotVersion = ref<number | null>(null)
-const conflictTechnicalExpandedIds = ref<number[]>([])
-const loadingConflictLogs = ref(false)
 const pausedByOperator = ref('')
 const loadingSnapshots = ref(false)
 const replayLoading = ref(false)
 const replayTargetVersion = ref<number | null>(null)
-const conflictSinceId = ref(0)
+// 协作元数据：Lamport 时钟、版本、批量操作上下文、待确认操作队列。
 const operationMetaByObjectKey = ref<Record<string, { operationId: string; startedAt: number }>>({})
 const collabClientId = ref('')
 const lamportClock = ref(0)
@@ -323,6 +328,7 @@ const redoStepCounts = ref<number[]>([])
 const pendingCreateObjectKeys = ref<Set<string>>(new Set())
 const deferredObjectOperations = ref<Record<string, DeferredObjectOperation[]>>({})
 const recoveringMissingGraphic = ref(false)
+// 他人协作可视化状态（当前以选中态为主，光标追踪预留）。
 const remoteCursors = ref<Record<number, RemoteCursorState>>({})
 const remoteSelections = ref<Record<number, RemoteSelectionState>>({})
 const lastCursorSentAt = ref(0)
@@ -334,6 +340,7 @@ const textEditorWidth = computed(() => {
   return Math.max(180, Math.min(360, estimated))
 })
 
+// 交互瞬态：草稿绘制、拖拽、缩放、旋转、框选等。
 const draft = ref<DraftGraphic>({
   active: false,
   start: { x: 0, y: 0 },
@@ -395,9 +402,11 @@ const selectionRect = ref<SelectionRectState>({
   end: { x: 0, y: 0 },
 })
 
+// 防抖同步标记：避免“选择变化 -> UI回填 -> watch再次提交”形成循环提交。
 const syncingSelectedStyle = ref(false)
 let selectedStyleSyncReleaseTask = 0
 
+// 常用派生状态。
 const sessionKey = computed(() => String(route.params.sessionKey || ''))
 const zoomScale = computed(() => zoomPercent.value / 100)
 const currentVersion = computed(() => sessionDetail.value?.currentVersion ?? sessionInfo.value?.currentVersion ?? 0)
@@ -573,18 +582,6 @@ const canEditLineStyle = computed(() => {
   }
   return selected.objectType !== 'text' && selected.objectType !== 'image'
 })
-const operationHistoryForDisplay = computed(() => {
-  return [...operationHistory.value].sort((a, b) => b.timestamp - a.timestamp)
-})
-const operationTimelineForDisplay = computed(() => operationTimeline.value?.list ?? [])
-const operationTimelineTotal = computed(() => operationTimeline.value?.total ?? 0)
-const operationTimelineUserOptions = computed(() => {
-  const members = sessionDetail.value?.members ?? []
-  return members.map((item) => ({
-    label: item.username,
-    value: item.userId,
-  }))
-})
 const pendingOperationsCount = computed(() => Object.keys(operationMetaByObjectKey.value).length)
 const recentConflictCount = computed(() => {
   const cutoff = Date.now() - 5 * 60 * 1000
@@ -657,8 +654,6 @@ let wsClient: WebSocketClient | null = null
 let heartbeatTimer: number | null = null
 let resizeObserver: ResizeObserver | null = null
 let renderFrame: number | null = null
-let membersRefreshTimer: number | null = null
-let membersRefreshRequestId = 0
 let focusHighlightTimer: number | null = null
 
 const HEARTBEAT_MS = 20_000
@@ -679,13 +674,11 @@ const CURSOR_SEND_MIN_DISTANCE = 3
 const CURSOR_IDLE_KEEPALIVE_MS = 10_000
 const REMOTE_CURSOR_STALE_MS = 12_000
 const REMOTE_SELECTION_STALE_MS = 45_000
-const CANVAS_BACKGROUND_KEY = 'collab_canvas_background_v1'
 const ONBOARDING_SEEN_KEY_PREFIX = 'collab_canvas_onboarding_seen_v1'
-const canvasBackgroundPresets = ['#ffffff', '#f8fafc', '#f6f7fb', '#fefce8', '#f0fdf4', '#eef2ff', '#fff1f2', '#f5f3ff']
-const imageElementCache = new Map<string, HTMLImageElement>()
-const imageFallbackLoading = new Set<string>()
-const imageObjectUrlBySource = new Map<string, string>()
 
+// ------------------------------
+// 页面初始化与配置读取
+// ------------------------------
 const getOnboardingSeenKey = () => {
   const userId = currentUserId.value ?? authStore.user?.userId ?? 0
   return `${ONBOARDING_SEEN_KEY_PREFIX}:${userId}`
@@ -703,10 +696,11 @@ const markOnboardingSeen = () => {
   try {
     localStorage.setItem(getOnboardingSeenKey(), '1')
   } catch {
-    // ignore localStorage error
+    // 忽略 localStorage 异常
   }
 }
 
+// 统一拼接 WebSocket 地址（随当前页面协议自动切换 ws/wss）。
 const getWsUrl = (): string => {
   const baseApi = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000/api/'
   const origin = baseApi.replace(/\/api\/?$/, '')
@@ -741,6 +735,7 @@ const loadImageNaturalSize = async (file: File): Promise<{ width: number; height
   }
 }
 
+// 计算插图初始尺寸：保持宽高比，并限制在画布可视范围内。
 const resolveImageInsertSize = (naturalWidth: number, naturalHeight: number): { width: number; height: number } => {
   if (naturalWidth <= 0 || naturalHeight <= 0) {
     return { width: IMAGE_INSERT_BOX_WIDTH, height: IMAGE_INSERT_BOX_HEIGHT }
@@ -751,6 +746,7 @@ const resolveImageInsertSize = (naturalWidth: number, naturalHeight: number): { 
   return { width, height }
 }
 
+// 为当前浏览器实例分配稳定 clientId，用于协作端识别与日志追踪。
 const loadOrCreateClientId = () => {
   const cacheKey = 'collab_drawing_client_id'
   const existing = localStorage.getItem(cacheKey)
@@ -763,53 +759,9 @@ const loadOrCreateClientId = () => {
   collabClientId.value = next
 }
 
-const normalizeHexColor = (value: string): string | null => {
-  const text = value.trim()
-  if (!text) {
-    return null
-  }
-  const withPrefix = text.startsWith('#') ? text : `#${text}`
-  if (!/^#([0-9a-fA-F]{6})$/.test(withPrefix)) {
-    return null
-  }
-  return withPrefix.toLowerCase()
-}
-
-const loadCanvasBackgroundColor = () => {
-  const cached = localStorage.getItem(CANVAS_BACKGROUND_KEY)
-  const normalized = cached ? normalizeHexColor(cached) : null
-  canvasBackgroundColor.value = normalized ?? '#ffffff'
-}
-
-const saveCanvasBackgroundColor = (value: string) => {
-  localStorage.setItem(CANVAS_BACKGROUND_KEY, value)
-}
-
-const hexToRgb = (value: string): { r: number; g: number; b: number } | null => {
-  const normalized = normalizeHexColor(value)
-  if (!normalized) {
-    return null
-  }
-  const raw = normalized.slice(1)
-  const r = Number.parseInt(raw.slice(0, 2), 16)
-  const g = Number.parseInt(raw.slice(2, 4), 16)
-  const b = Number.parseInt(raw.slice(4, 6), 16)
-  if (![r, g, b].every((item) => Number.isFinite(item))) {
-    return null
-  }
-  return { r, g, b }
-}
-
-const getGridColorForBackground = (backgroundHex: string): string => {
-  const rgb = hexToRgb(backgroundHex)
-  if (!rgb) {
-    return 'rgba(148, 163, 184, 0.22)'
-  }
-  const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255
-  const alpha = luminance > 0.62 ? 0.22 : 0.3
-  return luminance > 0.62 ? `rgba(148, 163, 184, ${alpha})` : `rgba(241, 245, 249, ${alpha})`
-}
-
+// ------------------------------
+// 通用解析与格式化工具
+// ------------------------------
 const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === 'object' && value !== null
 }
@@ -823,11 +775,61 @@ const parseNumber = (value: unknown, fallback = 0): number => {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+const formatOperationActorLabel = (userId: number) => {
+  return findMemberNameByUserId(userId) || `用户 ${userId}`
+}
+
+const {
+  operationTimelineLoading,
+  operationTimelineFilterUserId,
+  operationTimelineFilterOperationType,
+  operationTimelineFilterConflictType,
+  operationTimelineFilterFromVersion,
+  operationTimelineFilterToVersion,
+  operationTimelinePage,
+  operationTimelinePageSize,
+  operationTimelineForDisplay,
+  operationTimelineTotal,
+  operationTimelineUserOptions,
+  conflictLogs,
+  loadingConflictLogs,
+  isOperationTimelineTechnicalExpanded,
+  toggleOperationTimelineTechnical,
+  isConflictTechnicalExpanded,
+  toggleConflictTechnical,
+  openOperationTimeline,
+  resetOperationTimelineFilters,
+  searchOperationTimeline,
+  changeOperationTimelinePage,
+  refreshConflictLogs,
+  formatSessionOperationTypeLabel,
+  formatFieldNamesText,
+  formatConflictTypeLabel,
+  formatFieldNameLabel,
+  formatTimelineActivityText,
+  formatTimelineConflictHint,
+  getResolvedFieldList,
+  formatResolveReasonLabel,
+  formatConflictResolveStrategyLabel,
+  formatConflictValue,
+  formatConflictLogSummary,
+  operationTimelineTechnicalExpandedIds,
+  conflictTechnicalExpandedIds,
+} = useOperationConflictLogs({
+  getSessionKey: () => sessionKey.value,
+  getSessionMembers: () => sessionDetail.value?.members ?? [],
+  getOperationActorLabel: formatOperationActorLabel,
+  isRecord,
+  parseNumber,
+})
+
+// 生成本地 Lamport 时间：保证同端消息全序且与系统时间单调对齐。
 const nextLamportTime = () => {
   lamportClock.value = Math.max(lamportClock.value + 1, Date.now())
   return lamportClock.value
 }
 
+// 生成客户端 operationId，并可按 objectKey 跟踪“待服务端确认”的操作。
 const nextOperationId = (operationType: string, objectKey: string, trackByObject = true) => {
   const opId = `${operationType}_${objectKey}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   if (trackByObject) {
@@ -840,6 +842,7 @@ const nextBatchId = (label = 'batch') => {
   return `${label}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 }
 
+// 初始化一次批量操作的 WS 分组元数据（用于后端日志聚合、撤销分组）。
 const beginWsBatch = (size: number, label?: string) => {
   const safeSize = Math.max(1, Math.floor(size))
   wsBatchMeta.value = {
@@ -854,6 +857,7 @@ const endWsBatch = () => {
   wsBatchMeta.value = null
 }
 
+// 消费当前批次中的一条索引信息，附带到每次 WS 发送。
 const consumeWsBatchMeta = () => {
   const batch = wsBatchMeta.value
   if (!batch) {
@@ -887,6 +891,7 @@ const isGraphicCreatePending = (objectKey: string) => {
   return pendingCreateObjectKeys.value.has(objectKey)
 }
 
+// 图元尚未服务端确认创建前，先缓存 patch/delete，待创建回执后回放。
 const enqueueDeferredObjectOperation = (objectKey: string, operation: DeferredObjectOperation) => {
   if (!objectKey) {
     return
@@ -912,6 +917,7 @@ const clearDeferredObjectOperations = (objectKey: string) => {
   delete deferredObjectOperations.value[objectKey]
 }
 
+// 回放某图元的延迟操作队列，保证 create 与后续 update/delete 的因果顺序。
 const flushDeferredObjectOperations = (objectKey: string) => {
   if (!objectKey) {
     return
@@ -929,6 +935,9 @@ const flushDeferredObjectOperations = (objectKey: string) => {
   })
 }
 
+// ------------------------------
+// 本地历史分组：把多图元一次操作记为一个撤销步
+// ------------------------------
 const recordUndoStep = (count = 1) => {
   const safe = Math.max(1, Math.floor(count))
   undoStepCounts.value = [...undoStepCounts.value, safe]
@@ -960,6 +969,7 @@ const recordPatchOperation = () => {
   recordUndoStep(1)
 }
 
+// 把样式面板短时间内的多次改动合并后提交，减少 WS 消息量。
 const flushStyleCommitPatch = () => {
   const patch = styleCommitPatch.value
   styleCommitPatch.value = {}
@@ -985,6 +995,7 @@ const queueStyleCommitPatch = (
   }, 120)
 }
 
+// 兜底获取当前用户 id，防止 store 丢失时后续协作消息缺操作者字段。
 const ensureCurrentUserId = async (): Promise<number | null> => {
   if (currentUserId.value) {
     return currentUserId.value
@@ -1003,6 +1014,9 @@ const ensureCurrentUserId = async (): Promise<number | null> => {
   }
 }
 
+// ------------------------------
+// 在线保活与协作存在感广播
+// ------------------------------
 const clearHeartbeat = () => {
   if (heartbeatTimer !== null) {
     window.clearInterval(heartbeatTimer)
@@ -1017,7 +1031,7 @@ const sendHeartbeat = async () => {
   try {
     await sessionApi.heartbeat(sessionKey.value)
   } catch {
-    // ignore heartbeat error
+    // 忽略心跳发送异常
   }
 }
 
@@ -1039,6 +1053,7 @@ const startHeartbeat = () => {
   }, HEARTBEAT_MS)
 }
 
+// 渲染调度：一帧内合并多次状态变更，避免重复重绘。
 const scheduleRender = () => {
   if (renderFrame !== null) {
     return
@@ -1128,6 +1143,7 @@ const normalizeSelectionKeys = (value: string[]) => {
   return Array.from(new Set(value.map((item) => item.trim()).filter((item) => item.length > 0)))
 }
 
+// 广播“我当前选中了哪些图元”，供其他成员看到实时占用状态。
 const broadcastSelectionPresence = (force = false) => {
   if (!wsClient || !joined.value || !sessionKey.value || !wsConnected.value) {
     return
@@ -1148,6 +1164,9 @@ const broadcastSelectionPresence = (force = false) => {
   lastSelectionBroadcastSignature.value = signature
 }
 
+// ------------------------------
+// 坐标系与几何适配
+// ------------------------------
 const getCtx = (): CanvasRenderingContext2D | null => {
   const canvas = canvasRef.value
   if (!canvas) {
@@ -1156,6 +1175,7 @@ const getCtx = (): CanvasRenderingContext2D | null => {
   return canvas.getContext('2d')
 }
 
+// 把屏幕坐标转为画布世界坐标（反向应用缩放与平移）。
 const toCanvasPoint = (event: MouseEvent): Point | null => {
   const canvas = canvasRef.value
   if (!canvas) {
@@ -1168,229 +1188,14 @@ const toCanvasPoint = (event: MouseEvent): Point | null => {
   }
 }
 
-const normalizeRect = (x: number, y: number, width: number, height: number) => {
-  const left = Math.min(x, x + width)
-  const top = Math.min(y, y + height)
-  const right = Math.max(x, x + width)
-  const bottom = Math.max(y, y + height)
-  return {
-    x: left,
-    y: top,
-    width: right - left,
-    height: bottom - top,
-  }
-}
-
-const rotatePoint = (point: Point, center: Point, angleRad: number): Point => {
-  const cos = Math.cos(angleRad)
-  const sin = Math.sin(angleRad)
-  const dx = point.x - center.x
-  const dy = point.y - center.y
-  return {
-    x: center.x + dx * cos - dy * sin,
-    y: center.y + dx * sin + dy * cos,
-  }
-}
-
-const almostSamePoint = (a: Point, b: Point, epsilon = 1): boolean => {
-  return Math.hypot(a.x - b.x, a.y - b.y) <= epsilon
-}
-
-const isArrowPathGraphic = (graphic: GraphicVO): boolean => {
-  if (graphic.objectType !== 'path') {
-    return false
-  }
-  const points = graphic.pathPoints ?? []
-  if (points.length !== 5) {
-    return false
-  }
-  const start = points[0]
-  const end = points[1]
-  const left = points[2]
-  const endRepeat = points[3]
-  const right = points[4]
-  if (!start || !end || !left || !endRepeat || !right) {
-    return false
-  }
-  if (!almostSamePoint(end, endRepeat)) {
-    return false
-  }
-  if (almostSamePoint(start, end)) {
-    return false
-  }
-  if (almostSamePoint(left, end) || almostSamePoint(right, end)) {
-    return false
-  }
-  return true
-}
-
-const getArrowEndpoints = (graphic: GraphicVO): { start: Point; end: Point } | null => {
-  if (!isArrowPathGraphic(graphic)) {
-    return null
-  }
-  const points = graphic.pathPoints ?? []
-  const start = points[0]
-  const end = points[1]
-  if (!start || !end) {
-    return null
-  }
-  return {
-    start: { x: start.x, y: start.y },
-    end: { x: end.x, y: end.y },
-  }
-}
-
-const isLineLikeGraphic = (graphic: GraphicVO): boolean => {
-  return graphic.objectType === 'line' || isArrowPathGraphic(graphic)
-}
-
-const getRotatedRectBounds = (x: number, y: number, width: number, height: number, rotationDeg: number) => {
-  const rect = normalizeRect(x, y, width, height)
-  if (!rotationDeg) {
-    return rect
-  }
-  const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
-  const angle = (rotationDeg * Math.PI) / 180
-  const corners = [
-    { x: rect.x, y: rect.y },
-    { x: rect.x + rect.width, y: rect.y },
-    { x: rect.x, y: rect.y + rect.height },
-    { x: rect.x + rect.width, y: rect.y + rect.height },
-  ].map((p) => rotatePoint(p, center, angle))
-  const xs = corners.map((p) => p.x)
-  const ys = corners.map((p) => p.y)
-  return {
-    x: Math.min(...xs),
-    y: Math.min(...ys),
-    width: Math.max(...xs) - Math.min(...xs),
-    height: Math.max(...ys) - Math.min(...ys),
-  }
-}
-
-const getGraphicBounds = (graphic: GraphicVO) => {
-  if (graphic.objectType === 'image') {
-    return getRotatedRectBounds(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0, graphic.rotation ?? 0)
-  }
-
-  const arrowEndpoints = getArrowEndpoints(graphic)
-  if (arrowEndpoints) {
-    const { start, end } = arrowEndpoints
-    const pad = Math.max(6, graphic.strokeWidth + 4)
-    return {
-      x: Math.min(start.x, end.x) - pad,
-      y: Math.min(start.y, end.y) - pad,
-      width: Math.abs(end.x - start.x) + pad * 2,
-      height: Math.abs(end.y - start.y) + pad * 2,
-    }
-  }
-
-  if (graphic.objectType === 'path') {
-    const points = graphic.pathPoints ?? []
-    if (points.length === 0) {
-      return normalizeRect(graphic.positionX, graphic.positionY, 0, 0)
-    }
-    const xs = points.map((item) => item.x)
-    const ys = points.map((item) => item.y)
-    const minX = Math.min(...xs)
-    const maxX = Math.max(...xs)
-    const minY = Math.min(...ys)
-    const maxY = Math.max(...ys)
-    return {
-      x: minX,
-      y: minY,
-      width: Math.max(1, maxX - minX),
-      height: Math.max(1, maxY - minY),
-    }
-  }
-
-  if (graphic.objectType === 'line') {
-    const endX = graphic.positionX + (graphic.width ?? 0)
-    const endY = graphic.positionY + (graphic.height ?? 0)
-    const pad = Math.max(6, graphic.strokeWidth + 4)
-    return {
-      x: Math.min(graphic.positionX, endX) - pad,
-      y: Math.min(graphic.positionY, endY) - pad,
-      width: Math.abs(endX - graphic.positionX) + pad * 2,
-      height: Math.abs(endY - graphic.positionY) + pad * 2,
-    }
-  }
-
-  if (graphic.objectType === 'circle') {
-    const diameterX = Math.abs(graphic.width ?? 0)
-    const diameterY = Math.abs(graphic.height ?? 0)
-    const radiusX = diameterX / 2
-    const radiusY = diameterY / 2
-    return {
-      x: graphic.positionX - radiusX,
-      y: graphic.positionY - radiusY,
-      width: diameterX,
-      height: diameterY,
-    }
-  }
-
-  if (graphic.objectType === 'text') {
-    const width = graphic.width ?? 140
-    const height = graphic.height ?? Math.max((graphic.fontSize ?? 16) + 8, 24)
-    return getRotatedRectBounds(graphic.positionX, graphic.positionY, width, height, graphic.rotation ?? 0)
-  }
-
-  if (graphic.objectType === 'rect') {
-    return getRotatedRectBounds(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0, graphic.rotation ?? 0)
-  }
-
-  return normalizeRect(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0)
-}
-
-const getGraphicCenter = (graphic: GraphicVO): Point => {
-  if (graphic.objectType === 'circle') {
-    return { x: graphic.positionX, y: graphic.positionY }
-  }
-  if (graphic.objectType === 'path' && !isArrowPathGraphic(graphic)) {
-    const outline = getPathSelectionOutlinePoints(graphic)
-    const a = outline[0]
-    const c = outline[2]
-    if (a && c) {
-      return {
-        x: (a.x + c.x) / 2,
-        y: (a.y + c.y) / 2,
-      }
-    }
-  }
-  const bounds = getGraphicBounds(graphic)
-  return {
-    x: bounds.x + bounds.width / 2,
-    y: bounds.y + bounds.height / 2,
-  }
-}
-
-const getLocalResizeBounds = (graphic: GraphicVO) => {
-  if (graphic.objectType === 'circle') {
-    const width = Math.max(1, Math.abs(graphic.width ?? 0))
-    const height = Math.max(1, Math.abs(graphic.height ?? 0))
-    return {
-      x: graphic.positionX - width / 2,
-      y: graphic.positionY - height / 2,
-      width,
-      height,
-    }
-  }
-  if (graphic.objectType === 'path') {
-    const points = graphic.pathPoints ?? []
-    if (points.length === 0) {
-      return normalizeRect(graphic.positionX, graphic.positionY, 1, 1)
-    }
-    const xs = points.map((p) => p.x)
-    const ys = points.map((p) => p.y)
-    return {
-      x: Math.min(...xs),
-      y: Math.min(...ys),
-      width: Math.max(1, Math.max(...xs) - Math.min(...xs)),
-      height: Math.max(1, Math.max(...ys) - Math.min(...ys)),
-    }
-  }
-  return normalizeRect(graphic.positionX, graphic.positionY, graphic.width ?? 0, graphic.height ?? 0)
-}
-
+const getGraphicBounds = (graphic: GraphicVO) => getGraphicBoundsCore(graphic)
+const getGraphicCenter = (graphic: GraphicVO): Point => getGraphicCenterCore(graphic, PATH_CLOSE_DISTANCE)
+const getLocalResizeBounds = (graphic: GraphicVO) => getLocalResizeBoundsCore(graphic)
+const getGraphicSelectionRotationRad = (graphic: GraphicVO): number =>
+  getGraphicSelectionRotationRadCore(graphic, PATH_CLOSE_DISTANCE)
+const getPathSelectionOutlinePoints = (graphic: GraphicVO): Point[] =>
+  getPathSelectionOutlinePointsCore(graphic, PATH_CLOSE_DISTANCE)
+// 统一返回图元选中轮廓点：path 使用旋转轮廓，普通图元使用包围盒四角。
 const getSelectionOutlinePoints = (graphic: GraphicVO): Point[] => {
   if (graphic.objectType === 'path' && !isArrowPathGraphic(graphic)) {
     return getPathSelectionOutlinePoints(graphic)
@@ -1410,39 +1215,6 @@ const getSelectionOutlinePoints = (graphic: GraphicVO): Point[] => {
   return corners.map((p) => rotatePointAround(p, center, rotation))
 }
 
-const pointToSegmentDistance = (p: Point, start: Point, end: Point): number => {
-  const dx = end.x - start.x
-  const dy = end.y - start.y
-  if (dx === 0 && dy === 0) {
-    return Math.hypot(p.x - start.x, p.y - start.y)
-  }
-  const t = Math.max(0, Math.min(1, ((p.x - start.x) * dx + (p.y - start.y) * dy) / (dx * dx + dy * dy)))
-  const projX = start.x + t * dx
-  const projY = start.y + t * dy
-  return Math.hypot(p.x - projX, p.y - projY)
-}
-
-const pointInPolygon = (point: Point, polygon: Point[]): boolean => {
-  if (polygon.length < 3) {
-    return false
-  }
-  let inside = false
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
-    const pi = polygon[i]
-    const pj = polygon[j]
-    if (!pi || !pj) {
-      continue
-    }
-    const intersect =
-      (pi.y > point.y) !== (pj.y > point.y) &&
-      point.x < ((pj.x - pi.x) * (point.y - pi.y)) / ((pj.y - pi.y) || Number.EPSILON) + pi.x
-    if (intersect) {
-      inside = !inside
-    }
-  }
-  return inside
-}
-
 const isClosedPath = (points: Point[]): boolean => {
   if (points.length < 3) {
     return false
@@ -1455,594 +1227,81 @@ const isClosedPath = (points: Point[]): boolean => {
   return Math.hypot(first.x - last.x, first.y - last.y) <= PATH_CLOSE_DISTANCE
 }
 
-const normalizePathPointsOnFinish = (points: Point[]): Point[] => {
-  if (points.length < 2) {
-    return points
-  }
-  const first = points[0]
-  const last = points[points.length - 1]
-  if (!first || !last) {
-    return points
-  }
-  if (Math.hypot(first.x - last.x, first.y - last.y) > PATH_CLOSE_DISTANCE) {
-    return points
-  }
-  const next = points.slice()
-  next[next.length - 1] = { x: first.x, y: first.y }
-  return next
-}
+const {
+  pickGraphic,
+} = createCanvasHitTestHelpers({
+  getGraphicBounds,
+  getArrowEndpoints,
+  isClosedPath,
+})
 
-const buildArrowPathPoints = (start: Point, end: Point, strokeWidthValue: number): Point[] => {
-  const dx = end.x - start.x
-  const dy = end.y - start.y
-  const length = Math.hypot(dx, dy)
-  if (length < 2) {
-    return [start, end]
-  }
+const {
+  normalizePathPointsOnFinish,
+  buildArrowPathPoints,
+  getShapeVertexCount,
+  buildRegularPolygonPathPoints,
+  normalizeCircleDraftRect,
+} = createCanvasDraftHelpers({
+  pathCloseDistance: PATH_CLOSE_DISTANCE,
+  arrowHeadBase: ARROW_HEAD_BASE,
+  arrowHeadMax: ARROW_HEAD_MAX,
+})
 
-  const ux = dx / length
-  const uy = dy / length
-  const headLength = Math.min(ARROW_HEAD_MAX, Math.max(ARROW_HEAD_BASE, strokeWidthValue * 3))
-  const headAngle = Math.PI / 7
-  const cos = Math.cos(headAngle)
-  const sin = Math.sin(headAngle)
+const {
+  rotatePointAround,
+  isPointInRotatedRect,
+  getRectIntersectionArea,
+  getResizeHandlePoints,
+  getRotateHandlePoint,
+  getBoundsResizeHandles,
+  hitResizeHandleByBounds,
+  hitRotateHandleByBounds,
+  hitResizeHandle,
+  hitRotateHandle,
+  resizeBoundsByHandle,
+  applyTransformToGraphic,
+  applyRotateToGraphic,
+  rotateGraphicAround,
+  updateGraphicByResize,
+} = createCanvasTransformHelpers({
+  getGraphicBounds,
+  getGraphicCenter,
+  getLocalResizeBounds,
+  getGraphicSelectionRotationRad,
+  getPathSelectionOutlinePoints,
+  isArrowPathGraphic,
+  getArrowEndpoints,
+  buildArrowPathPoints,
+  resizeHandleHitSize: RESIZE_HANDLE_HIT_SIZE,
+  rotateHandleHitSize: ROTATE_HANDLE_HIT_SIZE,
+  rotateHandleOffset: ROTATE_HANDLE_OFFSET,
+  resizeMinSize: RESIZE_MIN_SIZE,
+  textMinFontSize: TEXT_MIN_FONT_SIZE,
+  textMaxFontSize: TEXT_MAX_FONT_SIZE,
+})
 
-  // Rotation around reversed direction vector for left/right arrow wing.
-  const lx = -ux * cos - -uy * sin
-  const ly = -ux * sin + -uy * cos
-  const rx = -ux * cos + -uy * sin
-  const ry = ux * sin + -uy * cos
+// 命中测试入口：按 zIndex 顺序挑选点击命中的顶层图元。
+const pickGraphicAtPoint = (point: Point): GraphicVO | null => pickGraphic(point, sortedGraphics.value)
 
-  const left: Point = {
-    x: end.x + lx * headLength,
-    y: end.y + ly * headLength,
-  }
-  const right: Point = {
-    x: end.x + rx * headLength,
-    y: end.y + ry * headLength,
-  }
+const {
+  drawLine,
+  drawRect,
+  drawCircle,
+  drawText,
+  drawPath,
+  drawImageGraphic,
+  drawGraphic,
+  disposeImageResources,
+} = useCanvasDrawPrimitives({
+  isArrowPathGraphic,
+  isClosedPath,
+  scheduleRender,
+  getToken: () => storage.getToken(),
+})
 
-  return [
-    { x: start.x, y: start.y },
-    { x: end.x, y: end.y },
-    { x: left.x, y: left.y },
-    { x: end.x, y: end.y },
-    { x: right.x, y: right.y },
-  ]
-}
-
-const getShapeVertexCount = (type: ShapeToolType): number => {
-  if (type === 'triangle') {
-    return 3
-  }
-  if (type === 'diamond') {
-    return 4
-  }
-  if (type === 'pentagon') {
-    return 5
-  }
-  return 6
-}
-
-const buildRegularPolygonPathPoints = (
-  center: Point,
-  radiusX: number,
-  radiusY: number,
-  vertexCount: number,
-): Point[] => {
-  if (vertexCount < 3) {
-    return []
-  }
-  const points: Point[] = []
-  const step = (Math.PI * 2) / vertexCount
-  const startAngle = -Math.PI / 2
-  for (let i = 0; i < vertexCount; i += 1) {
-    const angle = startAngle + step * i
-    points.push({
-      x: center.x + Math.cos(angle) * radiusX,
-      y: center.y + Math.sin(angle) * radiusY,
-    })
-  }
-  if (points.length > 0) {
-    const firstPoint = points[0]
-    if (firstPoint) {
-      points.push({ x: firstPoint.x, y: firstPoint.y })
-    }
-  }
-  return points
-}
-
-const normalizeCircleDraftRect = (start: Point, end: Point) => {
-  const dx = end.x - start.x
-  const dy = end.y - start.y
-  const size = Math.max(Math.abs(dx), Math.abs(dy))
-  const width = dx >= 0 ? size : -size
-  const height = dy >= 0 ? size : -size
-  return normalizeRect(start.x, start.y, width, height)
-}
-
-const normalizeAngleRad = (value: number) => {
-  let angle = value % Math.PI
-  if (angle > Math.PI / 2) {
-    angle -= Math.PI
-  }
-  if (angle <= -Math.PI / 2) {
-    angle += Math.PI
-  }
-  return angle
-}
-
-const estimatePathRotationRad = (points: Point[]): number => {
-  if (points.length < 2) {
-    return 0
-  }
-  const normalized = [...points]
-  if (normalized.length >= 3) {
-    const first = normalized[0]
-    const last = normalized[normalized.length - 1]
-    if (first && last && Math.hypot(first.x - last.x, first.y - last.y) <= PATH_CLOSE_DISTANCE) {
-      normalized.pop()
-    }
-  }
-  if (normalized.length < 2) {
-    return 0
-  }
-
-  let bestAngle = 0
-  let minArea = Number.POSITIVE_INFINITY
-  let bestPerimeter = Number.POSITIVE_INFINITY
-
-  for (let i = 0; i < normalized.length; i += 1) {
-    const a = normalized[i]
-    const b = normalized[(i + 1) % normalized.length]
-    if (!a || !b) {
-      continue
-    }
-    const dx = b.x - a.x
-    const dy = b.y - a.y
-    if (Math.hypot(dx, dy) < 1e-3) {
-      continue
-    }
-    const angle = normalizeAngleRad(Math.atan2(dy, dx))
-    const cos = Math.cos(-angle)
-    const sin = Math.sin(-angle)
-    let minX = Number.POSITIVE_INFINITY
-    let maxX = Number.NEGATIVE_INFINITY
-    let minY = Number.POSITIVE_INFINITY
-    let maxY = Number.NEGATIVE_INFINITY
-    normalized.forEach((point) => {
-      const x = point.x * cos - point.y * sin
-      const y = point.x * sin + point.y * cos
-      minX = Math.min(minX, x)
-      maxX = Math.max(maxX, x)
-      minY = Math.min(minY, y)
-      maxY = Math.max(maxY, y)
-    })
-    const width = Math.max(1e-3, maxX - minX)
-    const height = Math.max(1e-3, maxY - minY)
-    const area = width * height
-    const perimeter = width + height
-    if (area < minArea - 1e-3 || (Math.abs(area - minArea) <= 1e-3 && perimeter < bestPerimeter)) {
-      minArea = area
-      bestPerimeter = perimeter
-      bestAngle = angle
-    }
-  }
-
-  return normalizeAngleRad(bestAngle)
-}
-
-const shouldUseEstimatedPathRotation = (graphic: GraphicVO): boolean => {
-  const points = graphic.pathPoints ?? []
-  if (points.length < 4) {
-    return false
-  }
-  if (!isClosedPath(points)) {
-    return false
-  }
-  const normalized = [...points]
-  const first = normalized[0]
-  const last = normalized[normalized.length - 1]
-  if (first && last && Math.hypot(first.x - last.x, first.y - last.y) <= PATH_CLOSE_DISTANCE) {
-    normalized.pop()
-  }
-  // 仅对规则多边形这类顶点较少的闭合 path 使用估算角度；
-  // 自由画笔等复杂路径默认按轴向框选与拉伸，方向更符合预期。
-  return normalized.length >= 3 && normalized.length <= 8
-}
-
-const getGraphicSelectionRotationRad = (graphic: GraphicVO): number => {
-  if (isLineLikeGraphic(graphic)) {
-    return 0
-  }
-  const explicit = ((graphic.rotation ?? 0) * Math.PI) / 180
-  if (graphic.objectType !== 'path') {
-    return explicit
-  }
-  // path 在用户发生旋转后会同步写入 rotation，优先使用显式角度可避免
-  // 拉伸过程中对 pathPoints 重新估算角度导致手柄跳变。
-  if (Math.abs(explicit) > 1e-6) {
-    return explicit
-  }
-  if (!shouldUseEstimatedPathRotation(graphic)) {
-    return 0
-  }
-  return estimatePathRotationRad(graphic.pathPoints ?? [])
-}
-
-const rotatePointByAngle = (point: Point, angle: number): Point => {
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  return {
-    x: point.x * cos - point.y * sin,
-    y: point.x * sin + point.y * cos,
-  }
-}
-
-const getPathSelectionOutlinePoints = (graphic: GraphicVO): Point[] => {
-  const points = graphic.pathPoints ?? []
-  if (points.length < 2) {
-    return []
-  }
-  const normalized = [...points]
-  if (normalized.length >= 3) {
-    const first = normalized[0]
-    const last = normalized[normalized.length - 1]
-    if (first && last && Math.hypot(first.x - last.x, first.y - last.y) <= PATH_CLOSE_DISTANCE) {
-      normalized.pop()
-    }
-  }
-  if (normalized.length < 2) {
-    return []
-  }
-
-  const rotation = getGraphicSelectionRotationRad(graphic)
-  const localPoints = normalized.map((point) => rotatePointByAngle(point, -rotation))
-  const xs = localPoints.map((p) => p.x)
-  const ys = localPoints.map((p) => p.y)
-  const minX = Math.min(...xs)
-  const maxX = Math.max(...xs)
-  const minY = Math.min(...ys)
-  const maxY = Math.max(...ys)
-  // 给 path 选框增加留白，保证多边形顶点落在框内而非贴边/越界。
-  const padding = Math.max(3, graphic.strokeWidth / 2 + 1)
-  const localCorners: Point[] = [
-    { x: minX - padding, y: minY - padding },
-    { x: maxX + padding, y: minY - padding },
-    { x: maxX + padding, y: maxY + padding },
-    { x: minX - padding, y: maxY + padding },
-  ]
-  return localCorners.map((corner) => rotatePointByAngle(corner, rotation))
-}
-
-const pointInGraphic = (point: Point, graphic: GraphicVO): boolean => {
-  if (graphic.objectType === 'image') {
-    const bounds = getGraphicBounds(graphic)
-    return (
-      point.x >= bounds.x &&
-      point.x <= bounds.x + bounds.width &&
-      point.y >= bounds.y &&
-      point.y <= bounds.y + bounds.height
-    )
-  }
-
-  if (graphic.objectType === 'path') {
-    const arrowEndpoints = getArrowEndpoints(graphic)
-    if (arrowEndpoints) {
-      const hitDistance = Math.max(6, graphic.strokeWidth + 4)
-      return pointToSegmentDistance(point, arrowEndpoints.start, arrowEndpoints.end) <= hitDistance
-    }
-    const points = graphic.pathPoints ?? []
-    if (points.length < 2) {
-      return false
-    }
-    if (isClosedPath(points) && pointInPolygon(point, points)) {
-      return true
-    }
-    const hitDistance = Math.max(6, graphic.strokeWidth + 4)
-    for (let i = 1; i < points.length; i += 1) {
-      const start = points[i - 1]
-      const end = points[i]
-      if (!start || !end) {
-        continue
-      }
-      if (pointToSegmentDistance(point, start, end) <= hitDistance) {
-        return true
-      }
-    }
-    return false
-  }
-
-  if (graphic.objectType === 'line') {
-    const start = { x: graphic.positionX, y: graphic.positionY }
-    const end = { x: graphic.positionX + (graphic.width ?? 0), y: graphic.positionY + (graphic.height ?? 0) }
-    return pointToSegmentDistance(point, start, end) <= Math.max(6, graphic.strokeWidth + 4)
-  }
-
-  if (graphic.objectType === 'circle') {
-    const radiusX = Math.max(1, Math.abs(graphic.width ?? 0) / 2)
-    const radiusY = Math.max(1, Math.abs(graphic.height ?? 0) / 2)
-    const normalizedX = (point.x - graphic.positionX) / (radiusX + 4)
-    const normalizedY = (point.y - graphic.positionY) / (radiusY + 4)
-    return normalizedX * normalizedX + normalizedY * normalizedY <= 1
-  }
-
-  const bounds = getGraphicBounds(graphic)
-  return (
-    point.x >= bounds.x &&
-    point.x <= bounds.x + bounds.width &&
-    point.y >= bounds.y &&
-    point.y <= bounds.y + bounds.height
-  )
-}
-
-const pickGraphic = (point: Point): GraphicVO | null => {
-  const reverse = [...sortedGraphics.value].reverse()
-  for (const graphic of reverse) {
-    // 先做一次粗粒度包围盒过滤，减少复杂命中计算次数。
-    const bounds = getGraphicBounds(graphic)
-    const pad = Math.max(8, graphic.strokeWidth + 4)
-    if (
-      point.x < bounds.x - pad ||
-      point.x > bounds.x + bounds.width + pad ||
-      point.y < bounds.y - pad ||
-      point.y > bounds.y + bounds.height + pad
-    ) {
-      continue
-    }
-    if (pointInGraphic(point, graphic)) {
-      return graphic
-    }
-  }
-  return null
-}
-
-const drawLine = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
-  ctx.setLineDash(graphic.lineStyle === 'dashed' ? [8, 6] : [])
-  ctx.beginPath()
-  ctx.moveTo(graphic.positionX, graphic.positionY)
-  ctx.lineTo(graphic.positionX + (graphic.width ?? 0), graphic.positionY + (graphic.height ?? 0))
-  ctx.strokeStyle = graphic.strokeColor
-  ctx.lineWidth = graphic.strokeWidth
-  ctx.stroke()
-}
-
-const drawRect = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
-  const width = graphic.width ?? 0
-  const height = graphic.height ?? 0
-  const rotation = ((graphic.rotation ?? 0) * Math.PI) / 180
-  const center = { x: graphic.positionX + width / 2, y: graphic.positionY + height / 2 }
-  ctx.save()
-  if (rotation) {
-    ctx.translate(center.x, center.y)
-    ctx.rotate(rotation)
-    ctx.translate(-center.x, -center.y)
-  }
-  if (graphic.fillColor && graphic.fillColor !== 'transparent') {
-    ctx.fillStyle = graphic.fillColor
-    ctx.fillRect(graphic.positionX, graphic.positionY, width, height)
-  }
-  ctx.setLineDash(graphic.lineStyle === 'dashed' ? [8, 6] : [])
-  ctx.strokeStyle = graphic.strokeColor
-  ctx.lineWidth = graphic.strokeWidth
-  ctx.strokeRect(graphic.positionX, graphic.positionY, width, height)
-  ctx.restore()
-}
-
-const drawCircle = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
-  const radiusX = Math.abs(graphic.width ?? 0) / 2
-  const radiusY = Math.abs(graphic.height ?? 0) / 2
-  const rotation = ((graphic.rotation ?? 0) * Math.PI) / 180
-  ctx.beginPath()
-  ctx.ellipse(graphic.positionX, graphic.positionY, radiusX, radiusY, rotation, 0, Math.PI * 2)
-  if (graphic.fillColor && graphic.fillColor !== 'transparent') {
-    ctx.fillStyle = graphic.fillColor
-    ctx.fill()
-  }
-  ctx.setLineDash(graphic.lineStyle === 'dashed' ? [8, 6] : [])
-  ctx.strokeStyle = graphic.strokeColor
-  ctx.lineWidth = graphic.strokeWidth
-  ctx.stroke()
-}
-
-const drawText = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
-  const fontSize = graphic.fontSize ?? 16
-  const text = graphic.textContent ?? ''
-  const rotation = ((graphic.rotation ?? 0) * Math.PI) / 180
-  const boxWidth = graphic.width ?? Math.max(160, text.length * fontSize * 0.6)
-  const boxHeight = graphic.height ?? Math.max(fontSize + 8, 24)
-  const center = { x: graphic.positionX + boxWidth / 2, y: graphic.positionY + boxHeight / 2 }
-  ctx.save()
-  if (rotation) {
-    ctx.translate(center.x, center.y)
-    ctx.rotate(rotation)
-    ctx.translate(-center.x, -center.y)
-  }
-  ctx.fillStyle = graphic.strokeColor
-  ctx.font = `${fontSize}px sans-serif`
-  ctx.textBaseline = 'top'
-  ctx.fillText(text, graphic.positionX, graphic.positionY)
-  ctx.restore()
-}
-
-const drawPath = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
-  const points = graphic.pathPoints ?? []
-  if (points.length < 2) {
-    return
-  }
-  if (isArrowPathGraphic(graphic)) {
-    const start = points[0]
-    const end = points[1]
-    const left = points[2]
-    const right = points[4]
-    if (!start || !end || !left || !right) {
-      return
-    }
-    ctx.strokeStyle = graphic.strokeColor
-    ctx.lineWidth = graphic.strokeWidth
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
-
-    // Arrow shaft follows selected line style (solid/dashed).
-    ctx.setLineDash(graphic.lineStyle === 'dashed' ? [8, 6] : [])
-    ctx.beginPath()
-    ctx.moveTo(start.x, start.y)
-    ctx.lineTo(end.x, end.y)
-    ctx.stroke()
-
-    // Arrow head should stay solid for clear direction indication.
-    ctx.setLineDash([])
-    ctx.beginPath()
-    ctx.moveTo(end.x, end.y)
-    ctx.lineTo(left.x, left.y)
-    ctx.moveTo(end.x, end.y)
-    ctx.lineTo(right.x, right.y)
-    ctx.stroke()
-    return
-  }
-  const first = points[0]
-  if (!first) {
-    return
-  }
-  ctx.beginPath()
-  ctx.moveTo(first.x, first.y)
-  for (let i = 1; i < points.length; i += 1) {
-    const point = points[i]
-    if (!point) {
-      continue
-    }
-    ctx.lineTo(point.x, point.y)
-  }
-  if (isClosedPath(points)) {
-    ctx.closePath()
-    if (graphic.fillColor && graphic.fillColor !== 'transparent') {
-      ctx.fillStyle = graphic.fillColor
-      ctx.fill()
-    }
-  }
-  ctx.setLineDash(graphic.lineStyle === 'dashed' ? [8, 6] : [])
-  ctx.strokeStyle = graphic.strokeColor
-  ctx.lineWidth = graphic.strokeWidth
-  ctx.lineCap = 'round'
-  ctx.lineJoin = 'round'
-  ctx.stroke()
-}
-
-const drawImageGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
-  const width = Math.max(1, Math.abs(graphic.width ?? 0))
-  const height = Math.max(1, Math.abs(graphic.height ?? 0))
-  const x = graphic.positionX
-  const y = graphic.positionY
-  const src = graphic.textContent || ''
-  const rotation = ((graphic.rotation ?? 0) * Math.PI) / 180
-  const center = { x: x + width / 2, y: y + height / 2 }
-  const withRotation = (fn: () => void) => {
-    ctx.save()
-    if (rotation) {
-      ctx.translate(center.x, center.y)
-      ctx.rotate(rotation)
-      ctx.translate(-center.x, -center.y)
-    }
-    fn()
-    ctx.restore()
-  }
-  if (!src) {
-    withRotation(() => {
-      ctx.fillStyle = '#f3f4f6'
-      ctx.fillRect(x, y, width, height)
-    })
-    return
-  }
-
-  const cached = imageElementCache.get(src)
-  if (cached && cached.complete && cached.naturalWidth > 0 && cached.naturalHeight > 0) {
-    withRotation(() => {
-      ctx.drawImage(cached, x, y, width, height)
-    })
-    return
-  }
-
-  if (!cached) {
-    const image = new Image()
-    image.crossOrigin = 'anonymous'
-    image.onload = () => {
-      scheduleRender()
-    }
-    image.onerror = () => {
-      imageElementCache.delete(src)
-      if (!imageFallbackLoading.has(src)) {
-        imageFallbackLoading.add(src)
-        fetch(src, {
-          credentials: 'include',
-          headers: (() => {
-            const token = storage.getToken()
-            return token ? { Authorization: `Bearer ${token}` } : undefined
-          })(),
-        })
-          .then((response) => {
-            if (!response.ok) {
-              throw new Error(`图片拉取失败: ${response.status}`)
-            }
-            return response.blob()
-          })
-          .then((blob) => {
-            const objectUrl = URL.createObjectURL(blob)
-            imageObjectUrlBySource.set(src, objectUrl)
-            const fallbackImage = new Image()
-            fallbackImage.onload = () => {
-              imageElementCache.set(src, fallbackImage)
-              scheduleRender()
-            }
-            fallbackImage.onerror = () => {
-              scheduleRender()
-            }
-            fallbackImage.src = objectUrl
-          })
-          .catch(() => {
-            scheduleRender()
-          })
-          .finally(() => {
-            imageFallbackLoading.delete(src)
-          })
-      } else {
-        scheduleRender()
-      }
-    }
-    image.src = src
-    imageElementCache.set(src, image)
-  }
-
-  withRotation(() => {
-    ctx.fillStyle = '#f8fafc'
-    ctx.fillRect(x, y, width, height)
-  })
-}
-
-const drawGraphic = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
-  switch (graphic.objectType) {
-    case 'image':
-      drawImageGraphic(ctx, graphic)
-      break
-    case 'line':
-      drawLine(ctx, graphic)
-      break
-    case 'rect':
-      drawRect(ctx, graphic)
-      break
-    case 'circle':
-      drawCircle(ctx, graphic)
-      break
-    case 'text':
-      drawText(ctx, graphic)
-      break
-    case 'path':
-      drawPath(ctx, graphic)
-      break
-    default:
-      break
-  }
-}
-
+// ------------------------------
+// 绘制层：网格、选中框、多人标签
+// ------------------------------
 const drawGrid = (
   ctx: CanvasRenderingContext2D,
   viewLeft: number,
@@ -2074,6 +1333,46 @@ const drawGrid = (
   }
   ctx.restore()
 }
+
+const {
+  exportDialogVisible,
+  exportFormat,
+  exportIncludeGrid,
+  showGrid,
+  backgroundDialogVisible,
+  canvasBackgroundColor,
+  canvasBackgroundPresets,
+  focusMode,
+  focusActionsPos,
+  focusActionsCollapsed,
+  focusActionsDragging,
+  formatNowForFilename,
+  loadCanvasBackgroundColor,
+  getGridColorForBackground,
+  handleExportImage,
+  confirmExportImage,
+  handleToggleGrid,
+  applyCanvasBackgroundColor,
+  handleShowBackground,
+  handleToggleFocusMode,
+  clampFocusActionsPosition,
+  placeFocusActionsToRight,
+  startFocusActionsDrag,
+  stopFocusActionsDrag,
+} = useCanvasViewControls({
+  canvasRef,
+  focusActionsRef,
+  getZoomScale: () => zoomScale.value,
+  getViewportOffset: () => viewportOffset.value,
+  getSortedGraphics: () => sortedGraphics.value,
+  getCurrentSessionName: () => currentSessionName.value,
+  drawGrid,
+  drawGraphic,
+  scheduleRender,
+  onError: (message) => feedback.error(message),
+  onErrorFrom: (error, fallback) => feedback.errorFrom(error, fallback),
+  onSuccess: (message) => feedback.success(message),
+})
 
 const SELECTION_TAG_HEIGHT = 18
 const SELECTION_TAG_GAP = 4
@@ -2156,6 +1455,7 @@ const getGraphicTagAnchors = (graphic: GraphicVO, bounds: { x: number; y: number
   return getTopEdgeLabelAnchors(outline, bounds)
 }
 
+// 单选完整控制框：虚线框 + 八个锚点 + 旋转手柄 + 锁定标识。
 const drawSelection = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   const bounds = getGraphicBounds(graphic)
   const outline = getSelectionOutlinePoints(graphic)
@@ -2267,6 +1567,7 @@ const drawSelection = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   ctx.restore()
 }
 
+// 轻量选中框：交互进行中只画轮廓，减轻重绘压力。
 const drawSelectionOutlineOnly = (ctx: CanvasRenderingContext2D, graphic: GraphicVO) => {
   const bounds = getGraphicBounds(graphic)
   const outline = getSelectionOutlinePoints(graphic)
@@ -2296,6 +1597,7 @@ const drawSelectionOutlineOnly = (ctx: CanvasRenderingContext2D, graphic: Graphi
   ctx.restore()
 }
 
+// 多选整体框：把多个图元抽象成一个可旋转/缩放/拖拽的群组控制框。
 const drawMultiSelectionBounds = (ctx: CanvasRenderingContext2D, lightweight = false) => {
   const frame = multiSelectionFrame.value
   if (!frame || selectedGraphics.value.length < 2) {
@@ -2401,621 +1703,7 @@ const drawSelectionRectOverlay = (ctx: CanvasRenderingContext2D) => {
   ctx.restore()
 }
 
-const isPointInRect = (point: Point, rect: { x: number; y: number; width: number; height: number }) => {
-  return (
-    point.x >= rect.x &&
-    point.x <= rect.x + rect.width &&
-    point.y >= rect.y &&
-    point.y <= rect.y + rect.height
-  )
-}
-
-const isPointInRotatedRect = (
-  point: Point,
-  rect: { x: number; y: number; width: number; height: number },
-  rotationRad: number,
-) => {
-  if (!rotationRad) {
-    return isPointInRect(point, rect)
-  }
-  const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
-  const local = rotatePointAround(point, center, -rotationRad)
-  return isPointInRect(local, rect)
-}
-
-const getRectIntersectionArea = (
-  a: { x: number; y: number; width: number; height: number },
-  b: { x: number; y: number; width: number; height: number },
-) => {
-  const left = Math.max(a.x, b.x)
-  const top = Math.max(a.y, b.y)
-  const right = Math.min(a.x + a.width, b.x + b.width)
-  const bottom = Math.min(a.y + a.height, b.y + b.height)
-  const width = right - left
-  const height = bottom - top
-  if (width <= 0 || height <= 0) {
-    return 0
-  }
-  return width * height
-}
-
-const getResizeHandlePoints = (graphic: GraphicVO): Record<ResizeHandleKey, Point> => {
-  if (graphic.objectType === 'path' && !isArrowPathGraphic(graphic)) {
-    const outline = getPathSelectionOutlinePoints(graphic)
-    const nw = outline[0]
-    const ne = outline[1]
-    const se = outline[2]
-    const sw = outline[3]
-    if (nw && ne && se && sw) {
-      return {
-        n: { x: (nw.x + ne.x) / 2, y: (nw.y + ne.y) / 2 },
-        s: { x: (sw.x + se.x) / 2, y: (sw.y + se.y) / 2 },
-        e: { x: (ne.x + se.x) / 2, y: (ne.y + se.y) / 2 },
-        w: { x: (nw.x + sw.x) / 2, y: (nw.y + sw.y) / 2 },
-        nw,
-        ne,
-        sw,
-        se,
-      }
-    }
-  }
-  const local = getLocalResizeBounds(graphic)
-  const rotation = getGraphicSelectionRotationRad(graphic)
-  const center = getGraphicCenter(graphic)
-  const localHandles: Record<ResizeHandleKey, Point> = {
-    n: { x: local.x + local.width / 2, y: local.y },
-    s: { x: local.x + local.width / 2, y: local.y + local.height },
-    e: { x: local.x + local.width, y: local.y + local.height / 2 },
-    w: { x: local.x, y: local.y + local.height / 2 },
-    nw: { x: local.x, y: local.y },
-    ne: { x: local.x + local.width, y: local.y },
-    sw: { x: local.x, y: local.y + local.height },
-    se: { x: local.x + local.width, y: local.y + local.height },
-  }
-  if (!rotation) {
-    return localHandles
-  }
-  return {
-    n: rotatePointAround(localHandles.n, center, rotation),
-    s: rotatePointAround(localHandles.s, center, rotation),
-    e: rotatePointAround(localHandles.e, center, rotation),
-    w: rotatePointAround(localHandles.w, center, rotation),
-    nw: rotatePointAround(localHandles.nw, center, rotation),
-    ne: rotatePointAround(localHandles.ne, center, rotation),
-    sw: rotatePointAround(localHandles.sw, center, rotation),
-    se: rotatePointAround(localHandles.se, center, rotation),
-  }
-}
-
-const getRotateHandlePoint = (graphic: GraphicVO): Point => {
-  const handles = getResizeHandlePoints(graphic)
-  const center = getGraphicCenter(graphic)
-  const north = handles.n
-  const vx = north.x - center.x
-  const vy = north.y - center.y
-  const len = Math.hypot(vx, vy) || 1
-  return {
-    x: north.x + (vx / len) * ROTATE_HANDLE_OFFSET,
-    y: north.y + (vy / len) * ROTATE_HANDLE_OFFSET,
-  }
-}
-
-const hitRotateHandle = (point: Point, graphic: GraphicVO): boolean => {
-  const rotatePoint = getRotateHandlePoint(graphic)
-  return (
-    Math.abs(point.x - rotatePoint.x) <= ROTATE_HANDLE_HIT_SIZE &&
-    Math.abs(point.y - rotatePoint.y) <= ROTATE_HANDLE_HIT_SIZE
-  )
-}
-
-const getBoundsResizeHandles = (
-  bounds: { x: number; y: number; width: number; height: number },
-  rotationRad = 0,
-): Record<ResizeHandleKey, Point> => {
-  const local: Record<ResizeHandleKey, Point> = {
-    n: { x: bounds.x + bounds.width / 2, y: bounds.y },
-    s: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height },
-    e: { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 },
-    w: { x: bounds.x, y: bounds.y + bounds.height / 2 },
-    nw: { x: bounds.x, y: bounds.y },
-    ne: { x: bounds.x + bounds.width, y: bounds.y },
-    sw: { x: bounds.x, y: bounds.y + bounds.height },
-    se: { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
-  }
-  if (!rotationRad) {
-    return local
-  }
-  const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
-  return {
-    n: rotatePointAround(local.n, center, rotationRad),
-    s: rotatePointAround(local.s, center, rotationRad),
-    e: rotatePointAround(local.e, center, rotationRad),
-    w: rotatePointAround(local.w, center, rotationRad),
-    nw: rotatePointAround(local.nw, center, rotationRad),
-    ne: rotatePointAround(local.ne, center, rotationRad),
-    sw: rotatePointAround(local.sw, center, rotationRad),
-    se: rotatePointAround(local.se, center, rotationRad),
-  }
-}
-
-const hitResizeHandleByBounds = (
-  point: Point,
-  bounds: { x: number; y: number; width: number; height: number },
-  rotationRad = 0,
-): ResizeHandleKey | null => {
-  const handles = getBoundsResizeHandles(bounds, rotationRad)
-  for (const key of Object.keys(handles) as ResizeHandleKey[]) {
-    const handle = handles[key]
-    if (Math.abs(point.x - handle.x) <= RESIZE_HANDLE_HIT_SIZE && Math.abs(point.y - handle.y) <= RESIZE_HANDLE_HIT_SIZE) {
-      return key
-    }
-  }
-  return null
-}
-
-const hitRotateHandleByBounds = (
-  point: Point,
-  bounds: { x: number; y: number; width: number; height: number },
-  rotationRad = 0,
-) => {
-  const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 }
-  const handles = getBoundsResizeHandles(bounds, rotationRad)
-  const topMid = handles.n
-  const vx = topMid.x - center.x
-  const vy = topMid.y - center.y
-  const len = Math.hypot(vx, vy) || 1
-  const rotate = {
-    x: topMid.x + (vx / len) * ROTATE_HANDLE_OFFSET,
-    y: topMid.y + (vy / len) * ROTATE_HANDLE_OFFSET,
-  }
-  return Math.abs(point.x - rotate.x) <= ROTATE_HANDLE_HIT_SIZE && Math.abs(point.y - rotate.y) <= ROTATE_HANDLE_HIT_SIZE
-}
-
-const hitResizeHandle = (point: Point, graphic: GraphicVO): ResizeHandleKey | null => {
-  const arrowEndpoints = getArrowEndpoints(graphic)
-  if (arrowEndpoints) {
-    const startHit =
-      Math.abs(point.x - arrowEndpoints.start.x) <= RESIZE_HANDLE_HIT_SIZE &&
-      Math.abs(point.y - arrowEndpoints.start.y) <= RESIZE_HANDLE_HIT_SIZE
-    const endHit =
-      Math.abs(point.x - arrowEndpoints.end.x) <= RESIZE_HANDLE_HIT_SIZE &&
-      Math.abs(point.y - arrowEndpoints.end.y) <= RESIZE_HANDLE_HIT_SIZE
-    if (startHit) {
-      return 'nw'
-    }
-    if (endHit) {
-      return 'se'
-    }
-    return null
-  }
-  if (graphic.objectType === 'line') {
-    const start = { x: graphic.positionX, y: graphic.positionY }
-    const end = { x: graphic.positionX + (graphic.width ?? 0), y: graphic.positionY + (graphic.height ?? 0) }
-    const startHit =
-      Math.abs(point.x - start.x) <= RESIZE_HANDLE_HIT_SIZE && Math.abs(point.y - start.y) <= RESIZE_HANDLE_HIT_SIZE
-    const endHit =
-      Math.abs(point.x - end.x) <= RESIZE_HANDLE_HIT_SIZE && Math.abs(point.y - end.y) <= RESIZE_HANDLE_HIT_SIZE
-    if (startHit) {
-      return 'nw'
-    }
-    if (endHit) {
-      return 'se'
-    }
-    return null
-  }
-  if (graphic.objectType === 'text') {
-    const se = getResizeHandlePoints(graphic).se
-    if (Math.abs(point.x - se.x) <= RESIZE_HANDLE_HIT_SIZE && Math.abs(point.y - se.y) <= RESIZE_HANDLE_HIT_SIZE) {
-      return 'se'
-    }
-    return null
-  }
-  const handles = getResizeHandlePoints(graphic)
-  for (const key of Object.keys(handles) as ResizeHandleKey[]) {
-    const handle = handles[key]
-    if (Math.abs(point.x - handle.x) <= RESIZE_HANDLE_HIT_SIZE && Math.abs(point.y - handle.y) <= RESIZE_HANDLE_HIT_SIZE) {
-      return key
-    }
-  }
-  return null
-}
-
-const normalizeResizeRectFromHandle = (anchor: Point, moving: Point) => {
-  const left = Math.min(anchor.x, moving.x)
-  const right = Math.max(anchor.x, moving.x)
-  const top = Math.min(anchor.y, moving.y)
-  const bottom = Math.max(anchor.y, moving.y)
-  const width = Math.max(RESIZE_MIN_SIZE, right - left)
-  const height = Math.max(RESIZE_MIN_SIZE, bottom - top)
-  return {
-    x: left,
-    y: top,
-    width,
-    height,
-  }
-}
-
-const resizeBoundsByHandle = (
-  bounds: { x: number; y: number; width: number; height: number },
-  handle: ResizeHandleKey,
-  moving: Point,
-) => {
-  let left = bounds.x
-  let right = bounds.x + bounds.width
-  let top = bounds.y
-  let bottom = bounds.y + bounds.height
-
-  if (handle.includes('w')) {
-    left = moving.x
-  }
-  if (handle.includes('e')) {
-    right = moving.x
-  }
-  if (handle.includes('n')) {
-    top = moving.y
-  }
-  if (handle.includes('s')) {
-    bottom = moving.y
-  }
-  if (handle === 'n' || handle === 's') {
-    left = bounds.x
-    right = bounds.x + bounds.width
-  }
-  if (handle === 'e' || handle === 'w') {
-    top = bounds.y
-    bottom = bounds.y + bounds.height
-  }
-
-  const normalized = normalizeRect(left, top, right - left, bottom - top)
-  return {
-    x: normalized.x,
-    y: normalized.y,
-    width: Math.max(RESIZE_MIN_SIZE, normalized.width),
-    height: Math.max(RESIZE_MIN_SIZE, normalized.height),
-  }
-}
-
-const applyTransformToGraphic = (
-  original: GraphicVO,
-  sourceBounds: { x: number; y: number; width: number; height: number },
-  targetBounds: { x: number; y: number; width: number; height: number },
-): GraphicVO => {
-  const sx = sourceBounds.width === 0 ? 1 : targetBounds.width / sourceBounds.width
-  const sy = sourceBounds.height === 0 ? 1 : targetBounds.height / sourceBounds.height
-  const graphicBounds = getGraphicBounds(original)
-  const originalCenter = getGraphicCenter(original)
-  const relX = graphicBounds.x - sourceBounds.x
-  const relY = graphicBounds.y - sourceBounds.y
-  const nextX = targetBounds.x + relX * sx
-  const nextY = targetBounds.y + relY * sy
-  const nextWidth = Math.max(1, graphicBounds.width * sx)
-  const nextHeight = Math.max(1, graphicBounds.height * sy)
-
-  if (original.objectType === 'circle') {
-    return {
-      ...original,
-      positionX: nextX + nextWidth / 2,
-      positionY: nextY + nextHeight / 2,
-      width: nextWidth,
-      height: nextHeight,
-    }
-  }
-  if (original.objectType === 'text') {
-    const fontScale = Math.max(0.5, sy)
-    return {
-      ...original,
-      positionX: nextX,
-      positionY: nextY,
-      width: nextWidth,
-      height: nextHeight,
-      fontSize: Math.max(TEXT_MIN_FONT_SIZE, Math.min(TEXT_MAX_FONT_SIZE, Math.round((original.fontSize ?? 16) * fontScale))),
-    }
-  }
-  if (original.objectType === 'path') {
-    const base = original.pathPoints ?? []
-    const nextPathPoints = base.map((p) => ({
-      x: targetBounds.x + (p.x - sourceBounds.x) * sx,
-      y: targetBounds.y + (p.y - sourceBounds.y) * sy,
-    }))
-    return {
-      ...original,
-      positionX: nextX,
-      positionY: nextY,
-      width: nextWidth,
-      height: nextHeight,
-      pathPoints: nextPathPoints,
-    }
-  }
-  if (original.objectType === 'line') {
-    const start = { x: original.positionX, y: original.positionY }
-    const end = { x: original.positionX + (original.width ?? 0), y: original.positionY + (original.height ?? 0) }
-    const nextStart = {
-      x: targetBounds.x + (start.x - sourceBounds.x) * sx,
-      y: targetBounds.y + (start.y - sourceBounds.y) * sy,
-    }
-    const nextEnd = {
-      x: targetBounds.x + (end.x - sourceBounds.x) * sx,
-      y: targetBounds.y + (end.y - sourceBounds.y) * sy,
-    }
-    return {
-      ...original,
-      positionX: nextStart.x,
-      positionY: nextStart.y,
-      width: nextEnd.x - nextStart.x,
-      height: nextEnd.y - nextStart.y,
-    }
-  }
-  return {
-    ...original,
-    positionX: nextX,
-    positionY: nextY,
-    width: nextWidth,
-    height: nextHeight,
-    ...(original.objectType !== 'rect' && original.objectType !== 'image'
-      ? {
-          rotation: original.rotation,
-          positionX: targetBounds.x + (originalCenter.x - sourceBounds.x) * sx,
-          positionY: targetBounds.y + (originalCenter.y - sourceBounds.y) * sy,
-        }
-      : {}),
-  }
-}
-
-const rotatePointAround = (point: Point, center: Point, angle: number): Point => {
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  const dx = point.x - center.x
-  const dy = point.y - center.y
-  return {
-    x: center.x + dx * cos - dy * sin,
-    y: center.y + dx * sin + dy * cos,
-  }
-}
-
-const applyRotateToGraphic = (original: GraphicVO, center: Point, deltaAngle: number): GraphicVO => {
-  const arrowEndpoints = getArrowEndpoints(original)
-  if (arrowEndpoints) {
-    const nextStart = rotatePointAround(arrowEndpoints.start, center, deltaAngle)
-    const nextEnd = rotatePointAround(arrowEndpoints.end, center, deltaAngle)
-    const nextRotation = (((original.rotation ?? 0) + (deltaAngle * 180) / Math.PI) % 360 + 360) % 360
-    return {
-      ...original,
-      positionX: nextStart.x,
-      positionY: nextStart.y,
-      width: nextEnd.x - nextStart.x,
-      height: nextEnd.y - nextStart.y,
-      rotation: Math.round(nextRotation),
-      pathPoints: buildArrowPathPoints(nextStart, nextEnd, original.strokeWidth),
-    }
-  }
-  const originalCenter = getGraphicCenter(original)
-  const rotatedCenter = rotatePointAround(originalCenter, center, deltaAngle)
-  const nextRotation = (((original.rotation ?? 0) + (deltaAngle * 180) / Math.PI) % 360 + 360) % 360
-  if (original.objectType === 'path') {
-    const nextPath = (original.pathPoints ?? []).map((p) => rotatePointAround(p, center, deltaAngle))
-    return {
-      ...original,
-      positionX: rotatedCenter.x,
-      positionY: rotatedCenter.y,
-      rotation: Math.round(nextRotation),
-      pathPoints: nextPath,
-    }
-  }
-  if (original.objectType === 'line') {
-    const start = rotatePointAround({ x: original.positionX, y: original.positionY }, center, deltaAngle)
-    const end = rotatePointAround(
-      { x: original.positionX + (original.width ?? 0), y: original.positionY + (original.height ?? 0) },
-      center,
-      deltaAngle,
-    )
-    return {
-      ...original,
-      positionX: start.x,
-      positionY: start.y,
-      width: end.x - start.x,
-      height: end.y - start.y,
-      rotation: Math.round(nextRotation),
-    }
-  }
-  if (original.objectType === 'circle') {
-    return {
-      ...original,
-      positionX: rotatedCenter.x,
-      positionY: rotatedCenter.y,
-      rotation: Math.round(nextRotation),
-    }
-  }
-  if (original.objectType === 'rect' || original.objectType === 'image' || original.objectType === 'text') {
-    const baseWidth = Math.max(1, Math.abs(original.width ?? 0))
-    const baseHeight = Math.max(1, Math.abs(original.height ?? 0))
-    return {
-      ...original,
-      positionX: rotatedCenter.x - baseWidth / 2,
-      positionY: rotatedCenter.y - baseHeight / 2,
-      rotation: Math.round(nextRotation),
-    }
-  }
-  return {
-    ...original,
-    positionX: rotatedCenter.x,
-    positionY: rotatedCenter.y,
-    rotation: Math.round(nextRotation),
-  }
-}
-
-const rotateGraphicAround = (graphic: GraphicVO, center: Point, targetRotationDeg: number): GraphicVO => {
-  const originalRotation = graphic.rotation ?? 0
-  const deltaAngle = ((targetRotationDeg - originalRotation) * Math.PI) / 180
-  if (Math.abs(deltaAngle) < 1e-6) {
-    return {
-      ...graphic,
-      rotation: Math.round(targetRotationDeg),
-    }
-  }
-  return applyRotateToGraphic(graphic, center, deltaAngle)
-}
-
-const updateGraphicByResize = (
-  graphic: GraphicVO,
-  handle: ResizeHandleKey,
-  moving: Point,
-  sourceGraphic?: GraphicVO | null,
-): GraphicVO => {
-  const base = sourceGraphic ?? graphic
-  const baseArrowEndpoints = getArrowEndpoints(base)
-  if (baseArrowEndpoints) {
-    const dragStart = handle === 'nw'
-    const nextStart = dragStart ? moving : baseArrowEndpoints.start
-    const nextEnd = dragStart ? baseArrowEndpoints.end : moving
-    const nextPathPoints = buildArrowPathPoints(nextStart, nextEnd, base.strokeWidth)
-    return {
-      ...base,
-      positionX: nextStart.x,
-      positionY: nextStart.y,
-      width: nextEnd.x - nextStart.x,
-      height: nextEnd.y - nextStart.y,
-      pathPoints: nextPathPoints,
-    }
-  }
-  if (base.objectType === 'line') {
-    const start = { x: base.positionX, y: base.positionY }
-    const end = { x: base.positionX + (base.width ?? 0), y: base.positionY + (base.height ?? 0) }
-    const dragStart = handle === 'nw'
-    const nextStart = dragStart ? moving : start
-    const nextEnd = dragStart ? end : moving
-    return {
-      ...base,
-      positionX: nextStart.x,
-      positionY: nextStart.y,
-      width: nextEnd.x - nextStart.x,
-      height: nextEnd.y - nextStart.y,
-    }
-  }
-  const localBounds = getLocalResizeBounds(base)
-  const center = getGraphicCenter(base)
-  const rotation = getGraphicSelectionRotationRad(base)
-  const toLocal = (p: Point) => (rotation ? rotatePointAround(p, center, -rotation) : p)
-  const toWorld = (p: Point) => (rotation ? rotatePointAround(p, center, rotation) : p)
-  const movingLocal = toLocal(moving)
-  const bounds = localBounds
-  const anchor: Point = (() => {
-    if (handle === 'nw') return { x: bounds.x + bounds.width, y: bounds.y + bounds.height }
-    if (handle === 'ne') return { x: bounds.x, y: bounds.y + bounds.height }
-    if (handle === 'sw') return { x: bounds.x + bounds.width, y: bounds.y }
-    if (handle === 'se') return { x: bounds.x, y: bounds.y }
-    if (handle === 'n') return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height }
-    if (handle === 's') return { x: bounds.x + bounds.width / 2, y: bounds.y }
-    if (handle === 'e') return { x: bounds.x, y: bounds.y + bounds.height / 2 }
-    return { x: bounds.x + bounds.width, y: bounds.y + bounds.height / 2 }
-  })()
-
-  if (base.objectType === 'rect' || base.objectType === 'image') {
-    const targetBounds = resizeBoundsByHandle(bounds, handle, movingLocal)
-    const topLeft = toWorld({ x: targetBounds.x, y: targetBounds.y })
-    const nextCenter = toWorld({ x: targetBounds.x + targetBounds.width / 2, y: targetBounds.y + targetBounds.height / 2 })
-    const alignedTopLeft = {
-      x: nextCenter.x - targetBounds.width / 2,
-      y: nextCenter.y - targetBounds.height / 2,
-    }
-    return {
-      ...base,
-      positionX: rotation ? alignedTopLeft.x : topLeft.x,
-      positionY: rotation ? alignedTopLeft.y : topLeft.y,
-      width: targetBounds.width,
-      height: targetBounds.height,
-    }
-  }
-
-  if (base.objectType === 'path') {
-    const basePathPoints = base.pathPoints ?? []
-    if (basePathPoints.length === 0) {
-      return base
-    }
-    const outline = getPathSelectionOutlinePoints(base)
-    const sourceBounds = (() => {
-      if (outline.length === 4) {
-        const localOutline = outline.map((point) => toLocal(point))
-        const xs = localOutline.map((point) => point.x)
-        const ys = localOutline.map((point) => point.y)
-        return {
-          x: Math.min(...xs),
-          y: Math.min(...ys),
-          width: Math.max(RESIZE_MIN_SIZE, Math.max(...xs) - Math.min(...xs)),
-          height: Math.max(RESIZE_MIN_SIZE, Math.max(...ys) - Math.min(...ys)),
-        }
-      }
-      return bounds
-    })()
-    const targetBounds = resizeBoundsByHandle(sourceBounds, handle, movingLocal)
-    const sx = sourceBounds.width === 0 ? 1 : targetBounds.width / sourceBounds.width
-    const sy = sourceBounds.height === 0 ? 1 : targetBounds.height / sourceBounds.height
-    const localPathPoints = basePathPoints.map((point) => toLocal(point))
-    const nextLocalPathPoints = localPathPoints.map((point) => ({
-      x: targetBounds.x + (point.x - sourceBounds.x) * sx,
-      y: targetBounds.y + (point.y - sourceBounds.y) * sy,
-    }))
-    const nextPathPoints = nextLocalPathPoints.map((point) => toWorld(point))
-    const xs = nextPathPoints.map((point) => point.x)
-    const ys = nextPathPoints.map((point) => point.y)
-    const nextBounds = {
-      x: Math.min(...xs),
-      y: Math.min(...ys),
-      width: Math.max(1, Math.max(...xs) - Math.min(...xs)),
-      height: Math.max(1, Math.max(...ys) - Math.min(...ys)),
-    }
-    return {
-      ...base,
-      positionX: nextBounds.x,
-      positionY: nextBounds.y,
-      width: nextBounds.width,
-      height: nextBounds.height,
-      pathPoints: nextPathPoints,
-    }
-  }
-
-  if (base.objectType === 'text') {
-    const rect = normalizeResizeRectFromHandle(anchor, movingLocal)
-    const originalBounds = localBounds
-    const baseHeight = Math.max(1, originalBounds.height)
-    const ratio = rect.height / baseHeight
-    const nextFontSize = Math.max(
-      TEXT_MIN_FONT_SIZE,
-      Math.min(TEXT_MAX_FONT_SIZE, Math.round((base.fontSize ?? 16) * ratio)),
-    )
-    const rectCenterWorld = toWorld({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })
-    return {
-      ...base,
-      positionX: rectCenterWorld.x - rect.width / 2,
-      positionY: rectCenterWorld.y - rect.height / 2,
-      width: rect.width,
-      height: rect.height,
-      fontSize: nextFontSize,
-    }
-  }
-
-  if (base.objectType === 'circle') {
-    const targetBounds = resizeBoundsByHandle(bounds, handle, movingLocal)
-    const circleCenter = toWorld({ x: targetBounds.x + targetBounds.width / 2, y: targetBounds.y + targetBounds.height / 2 })
-    return {
-      ...base,
-      positionX: circleCenter.x,
-      positionY: circleCenter.y,
-      width: targetBounds.width,
-      height: targetBounds.height,
-    }
-  }
-
-  const rect = normalizeResizeRectFromHandle(anchor, movingLocal)
-  const fallbackCenter = toWorld({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })
-  return {
-    ...base,
-    positionX: fallbackCenter.x,
-    positionY: fallbackCenter.y,
-    width: rect.width,
-    height: rect.height,
-  }
-}
-
+// 对当前选中图元批量应用样式（支持多选统一改色/线宽/线型）。
 const updateSelectedGraphicStyle = (
   patch: Partial<Pick<GraphicVO, 'strokeColor' | 'fillColor' | 'strokeWidth' | 'lineStyle'>>,
 ) => {
@@ -3062,6 +1750,7 @@ const updateSelectedGraphicStyle = (
   }
 }
 
+// 根据当前工具与鼠标拖拽草稿，实时构建预览图元（未提交到服务端）。
 const getPreviewGraphic = (): GraphicVO | null => {
   if (!draft.value.active || activeTool.value === 'select' || activeTool.value === 'text') {
     return null
@@ -3307,6 +1996,7 @@ const drawRemoteCursors = (ctx: CanvasRenderingContext2D) => {
   ctx.restore()
 }
 
+// 绘制他人选中态标签：显示“谁正在操作哪个图元”。
 const drawRemoteSelections = (ctx: CanvasRenderingContext2D) => {
   const now = Date.now()
   const validStates = Object.values(remoteSelections.value).filter((item) => now - item.updatedAt <= REMOTE_SELECTION_STALE_MS)
@@ -3462,6 +2152,7 @@ const intersectsViewport = (
   return true
 }
 
+// 统一渲染主链路：背景/网格 -> 图元 -> 草稿 -> 选择态 -> 远端协作标记。
 const renderCanvas = () => {
   const canvas = canvasRef.value
   const ctx = getCtx()
@@ -3549,6 +2240,9 @@ const teardownResizeObserver = () => {
   }
 }
 
+// ------------------------------
+// 本地图元仓库写入
+// ------------------------------
 const upsertGraphic = (graphic: GraphicVO) => {
   const index = canvasStore.graphics.findIndex((item) => item.objectKey === graphic.objectKey)
   if (index === -1) {
@@ -3589,6 +2283,7 @@ const removeGraphic = (objectKey: string) => {
   scheduleRender()
 }
 
+// 全量/增量同步后的合并策略：按 objectKey 去重覆盖，保持本地引用稳定。
 const mergeGraphicsByObjectKey = (incoming: GraphicVO[]) => {
   if (incoming.length === 0) {
     return
@@ -3626,6 +2321,7 @@ const toOperationPathPoints = (value: unknown): Array<{ x: number; y: number }> 
   return points.length > 0 ? points : null
 }
 
+// 将后端/历史格式的未知数据归一化为前端 GraphicVO。
 const toGraphicFromUnknown = (value: unknown, fallbackObjectKey?: string): GraphicVO | null => {
   if (!isRecord(value)) {
     return null
@@ -3660,6 +2356,7 @@ const toGraphicFromUnknown = (value: unknown, fallbackObjectKey?: string): Graph
   }
 }
 
+// 版本推进：维护会话当前版本、客户端版本、服务端版本三者一致。
 const updateSessionVersion = (version: number) => {
   serverVersionRef.value = version
   if (sessionInfo.value) {
@@ -3670,6 +2367,9 @@ const updateSessionVersion = (version: number) => {
   }
 }
 
+// ------------------------------
+// 与后端同步：优先增量回放，必要时全量拉取
+// ------------------------------
 const syncGraphicsFromServer = async (forceFull = false) => {
   if (!sessionKey.value) {
     return
@@ -3707,6 +2407,9 @@ const syncGraphicsFromServer = async (forceFull = false) => {
   }
 }
 
+// ------------------------------
+// WS 事件处理
+// ------------------------------
 const applyMemberList = (members: MemberVO[]) => {
   if (!sessionDetail.value) {
     return
@@ -3789,6 +2492,7 @@ const handleSessionLeft = async (payload: SessionLeftData) => {
   await router.push('/')
 }
 
+// 服务端确认创建后：落本地、清 pending、回放该图元延迟队列。
 const handleGraphicCreated = (payload: GraphicCreatedData) => {
   if (payload.sessionKey !== sessionKey.value) {
     return
@@ -3814,6 +2518,7 @@ const handleGraphicCreated = (payload: GraphicCreatedData) => {
   lastSyncText.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+// 服务端更新回执：合并 patch，并对缺失图元做恢复补偿。
 const handleGraphicUpdated = (payload: GraphicUpdatedData) => {
   if (payload.sessionKey !== sessionKey.value) {
     return
@@ -4010,6 +2715,7 @@ const handleWsRedoResult = (data: import('@/ws/types').RedoResultData) => {
   scheduleRender()
 }
 
+// 冲突解决事件：记录冲突焦点、提示策略结果，并刷新渲染。
 const handleWsOperationResolved = (data: OperationResolvedData) => {
   if (!data.operationId) {
     return
@@ -4069,6 +2775,7 @@ const handleWsOperationResolved = (data: OperationResolvedData) => {
   scheduleRender()
 }
 
+// 将单条历史操作重放到当前画布（用于断线重连后的增量追平）。
 const applyOperationReplayItem = (operation: SessionOperationItemVO) => {
   if (operation.operationType === 'delete') {
     removeGraphic(operation.objectKey)
@@ -4136,6 +2843,7 @@ const syncOperationsFromServer = async (): Promise<boolean> => {
   }
 }
 
+// WS 事件总线绑定：把网络事件接入当前页面状态机。
 const bindWs = (client: WebSocketClient) => {
   client.on('connected', handleWsConnected)
   client.on('disconnected', handleWsDisconnected)
@@ -4178,115 +2886,123 @@ const unbindWs = (client: WebSocketClient) => {
   client.off('redo_result', handleWsRedoResult)
 }
 
-const refreshSessionMembers = async () => {
-  if (!sessionKey.value || !sessionDetail.value) {
-    return
-  }
-  const requestId = ++membersRefreshRequestId
-  loadingMembers.value = true
-  try {
-    const detail = await sessionApi.getDetail(sessionKey.value, includeHistoryMembers.value)
-    if (requestId !== membersRefreshRequestId) {
+const {
+  onVisibilityChange: lifecycleOnVisibilityChange,
+  refreshSessionMembers,
+  scheduleMembersRefresh,
+  clearMembersRefreshTimer,
+} = useSessionLifecycle({
+  getSessionKey: () => sessionKey.value,
+  getJoined: () => joined.value,
+  isWsConnected: () => wsConnected.value,
+  reconnectWs: () => {
+    if (!wsClient) {
       return
     }
-    sessionDetail.value = {
-      ...sessionDetail.value,
-      ...detail,
-      members: detail.members,
-      memberCount: detail.members.length,
-      onlineMemberCount: detail.members.filter((item) => item.onlineStatus === 1).length,
-    }
-  } catch (error: any) {
+    wsClient.connect()
+  },
+  getIncludeHistoryMembers: () => includeHistoryMembers.value,
+  getSessionDetail: () => sessionDetail.value,
+  setSessionDetail: (detail) => {
+    sessionDetail.value = detail
+  },
+  setLoadingMembers: (loading) => {
+    loadingMembers.value = loading
+  },
+  onMemberRefreshError: (error) => {
     feedback.errorFrom(error, '刷新成员列表失败')
-  } finally {
-    loadingMembers.value = false
-  }
-}
+  },
+})
 
-const scheduleMembersRefresh = (delay = 250) => {
-  if (membersRefreshTimer !== null) {
-    window.clearTimeout(membersRefreshTimer)
-  }
-  membersRefreshTimer = window.setTimeout(() => {
-    membersRefreshTimer = null
-    void refreshSessionMembers()
-  }, delay)
-}
+const {
+  inviteDialogVisible,
+  inviteDialogLoading,
+  inviteListLoading,
+  inviteList,
+  memberManageDialogVisible,
+  shareQrcodePendingLink,
+  shareQrcodeVisible,
+  loadInviteList,
+  openInviteDialog,
+  handleCreateInvite,
+  handleCopyInvite,
+  handleShowInviteQr,
+  handleRevokeInvite,
+  handleShowMembersManage,
+  handleUpdateMemberRole,
+  handleRemoveMember,
+} = useInviteMemberManagement({
+  getSessionKey: () => sessionKey.value,
+  canRemoveMember: () => isCreator.value,
+  refreshSessionMembers,
+  confirmDanger,
+  onSuccess: (message) => feedback.success(message),
+  onError: (error, fallback) => feedback.errorFrom(error, fallback),
+  onWarning: (message) => feedback.warning(message),
+})
 
-const joinSession = async () => {
-  if (!sessionKey.value || joining.value || joined.value) {
-    return
-  }
-  joining.value = true
-  try {
-    await ensureCurrentUserId()
-    const inviteToken = typeof route.query.inviteToken === 'string' ? route.query.inviteToken.trim() : undefined
-    const joinedData = await sessionApi.join(sessionKey.value, inviteToken || undefined)
-    sessionInfo.value = joinedData
-    sessionDetail.value = await sessionApi.getDetail(sessionKey.value, includeHistoryMembers.value)
-    joined.value = true
-
-    const token = storage.getToken()
-    if (!token) {
-      throw new Error('未登录')
-    }
-    const client = new WebSocketClient(getWsUrl(), token, sessionKey.value)
-    bindWs(client)
-    wsClient = client
+const {
+  joinSession,
+  handleLeaveSession,
+  handleDeleteSession,
+} = useSessionJoinLeave({
+  getSessionKey: () => sessionKey.value,
+  getInviteToken: () => (typeof route.query.inviteToken === 'string' ? route.query.inviteToken.trim() : undefined),
+  getJoining: () => joining.value,
+  getJoined: () => joined.value,
+  getIncludeHistoryMembers: () => includeHistoryMembers.value,
+  getIsCreator: () => isCreator.value,
+  getWsUrl,
+  getToken: () => storage.getToken(),
+  ensureCurrentUserId,
+  setJoining: (value) => {
+    joining.value = value
+  },
+  setJoined: (value) => {
+    joined.value = value
+  },
+  setNavigatingAway: (value) => {
+    navigatingAway.value = value
+  },
+  setSessionInfo: (value) => {
+    sessionInfo.value = value
+  },
+  setSessionDetail: (value) => {
+    sessionDetail.value = value
+  },
+  setWsClient: (value) => {
+    wsClient = value
+  },
+  bindWs,
+  bindCanvasSession: (joinedData, client) => {
     canvasStore.bindSession(joinedData, client)
-    client.connect()
-
-    startHeartbeat()
-    await router.replace({
-      path: `/session/${sessionKey.value}`,
-      query: {},
-    })
-  } catch (error) {
-    feedback.errorFrom(error, '加入会话失败')
-    await router.replace('/')
-  } finally {
-    joining.value = false
-  }
-}
-
-const handleLeaveSession = async () => {
-  if (!sessionKey.value) {
-    return
-  }
-  try {
-    const confirmed = await confirmDanger('确认退出当前会话吗？', '退出会话', { confirmButtonText: '确认退出' })
-    if (!confirmed) {
+  },
+  startHeartbeat,
+  confirmAction: (message, title, confirmButtonText) =>
+    confirmDanger(message, title, {
+      confirmButtonText,
+    }),
+  onError: (error, fallback) => feedback.errorFrom(error, fallback),
+  onSuccess: (message) => feedback.success(message),
+  navigate: async (path) => {
+    if (path === '/') {
+      await router.replace('/')
       return
     }
-    navigatingAway.value = true
-    await sessionApi.leave(sessionKey.value)
-    feedback.success('已退出会话')
-    await router.push('/')
-  } catch (error) {
-    feedback.errorFrom(error, '退出会话失败')
-  }
-}
-
-const handleDeleteSession = async () => {
-  if (!sessionKey.value || !isCreator.value) {
-    return
-  }
-  try {
-    const confirmed = await confirmDanger('确认删除当前会话吗？删除后不可恢复。', '删除会话', {
-      confirmButtonText: '确认删除',
-    })
-    if (!confirmed) {
+    if (path.startsWith('/session/')) {
+      await router.replace({
+        path,
+        query: {},
+      })
       return
     }
-    navigatingAway.value = true
-    await sessionApi.deleteSession(sessionKey.value)
-    feedback.success('会话已删除')
-    await router.push('/my-sessions')
-  } catch (error) {
-    feedback.errorFrom(error, '删除会话失败')
-  }
-}
+    await router.push(path)
+  },
+})
 
+// ------------------------------
+// 顶栏/面板动作处理
+// ------------------------------
 const handleTransferCreator = (member: MemberVO) => {
   if (!sessionKey.value || !isCreator.value) {
     return
@@ -4294,309 +3010,29 @@ const handleTransferCreator = (member: MemberVO) => {
   feedback.info(`当前版本暂不支持转交创建者（目标：${member.username}）`)
 }
 
-const handleRemoveMember = (member: MemberVO) => {
-  if (!sessionKey.value || !isCreator.value) {
-    return
-  }
-  confirmDanger(`确认移除成员“${member.username}”吗？`, '移除成员', { confirmButtonText: '确认移除' })
-    .then(async (confirmed) => {
-      if (!confirmed) {
-        return
-      }
-      await sessionApi.removeMember(sessionKey.value, member.userId)
-      feedback.success('成员已移除')
-      await refreshSessionMembers()
-    })
-    .catch((error) => {
-      feedback.errorFrom(error, '移除成员失败')
-    })
-}
-
 const handleShare = async () => {
-  inviteDialogVisible.value = true
-  await loadInviteList()
-}
-
-const sanitizeFilename = (name: string) => {
-  return name.replace(/[\\/:*?"<>|]/g, '_').trim() || '未命名会话'
-}
-
-const formatNowForFilename = () => {
-  const now = new Date()
-  const y = now.getFullYear()
-  const m = String(now.getMonth() + 1).padStart(2, '0')
-  const d = String(now.getDate()).padStart(2, '0')
-  const hh = String(now.getHours()).padStart(2, '0')
-  const mm = String(now.getMinutes()).padStart(2, '0')
-  const ss = String(now.getSeconds()).padStart(2, '0')
-  return `${y}${m}${d}_${hh}${mm}${ss}`
-}
-
-const downloadBlob = (blob: Blob, filename: string) => {
-  const objectUrl = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = objectUrl
-  anchor.download = filename
-  document.body.appendChild(anchor)
-  anchor.click()
-  document.body.removeChild(anchor)
-  URL.revokeObjectURL(objectUrl)
-}
-
-const createExportCanvas = () => {
-  const canvas = canvasRef.value
-  if (!canvas) {
-    return null
-  }
-  const exportCanvas = document.createElement('canvas')
-  exportCanvas.width = canvas.width
-  exportCanvas.height = canvas.height
-  const exportCtx = exportCanvas.getContext('2d')
-  if (!exportCtx) {
-    return null
-  }
-  exportCtx.fillStyle = canvasBackgroundColor.value
-  exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height)
-
-  exportCtx.save()
-  exportCtx.scale(zoomScale.value, zoomScale.value)
-  exportCtx.translate(viewportOffset.value.x, viewportOffset.value.y)
-  const worldWidth = exportCanvas.width / zoomScale.value
-  const worldHeight = exportCanvas.height / zoomScale.value
-  const viewLeft = -viewportOffset.value.x
-  const viewTop = -viewportOffset.value.y
-  const viewRight = viewLeft + worldWidth
-  const viewBottom = viewTop + worldHeight
-
-  if (exportIncludeGrid.value) {
-    drawGrid(exportCtx, viewLeft, viewTop, viewRight, viewBottom, canvasBackgroundColor.value)
-  }
-  sortedGraphics.value.forEach((graphic) => drawGraphic(exportCtx, graphic))
-  exportCtx.restore()
-  return exportCanvas
-}
-
-const blobFromCanvas = (canvas: HTMLCanvasElement, type: 'image/png' | 'image/jpeg', quality = 1) => {
-  return new Promise<Blob | null>((resolve) => {
-    canvas.toBlob((file) => resolve(file), type, quality)
-  })
-}
-
-const buildSimplePdfFromJpegBytes = (jpegBytes: Uint8Array, widthPx: number, heightPx: number): Blob => {
-  const widthPt = Math.max(1, (widthPx * 72) / 96)
-  const heightPt = Math.max(1, (heightPx * 72) / 96)
-  const contentStream = `q\n${widthPt} 0 0 ${heightPt} 0 0 cm\n/Im0 Do\nQ\n`
-
-  const encoder = new TextEncoder()
-  const chunks: string[] = []
-  const offsets: number[] = [0]
-  let length = 0
-
-  const pushText = (value: string) => {
-    const bytes = encoder.encode(value)
-    chunks.push(value)
-    length += bytes.length
-  }
-  const pushBytes = (bytes: Uint8Array) => {
-    let binary = ''
-    for (let i = 0; i < bytes.length; i += 1) {
-      binary += String.fromCharCode(bytes[i] ?? 0)
-    }
-    chunks.push(binary)
-    length += bytes.length
-  }
-
-  const addObject = (id: number, body: string, binary?: Uint8Array) => {
-    offsets[id] = length
-    pushText(`${id} 0 obj\n${body}\n`)
-    if (binary) {
-      pushText('stream\n')
-      pushBytes(binary)
-      pushText('\nendstream\n')
-    }
-    pushText('endobj\n')
-  }
-
-  pushText('%PDF-1.4\n')
-  addObject(1, '<< /Type /Catalog /Pages 2 0 R >>')
-  addObject(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>')
-  addObject(
-    3,
-    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${widthPt} ${heightPt}] /Resources << /XObject << /Im0 5 0 R >> /ProcSet [/PDF /ImageC] >> /Contents 4 0 R >>`,
-  )
-  addObject(4, `<< /Length ${encoder.encode(contentStream).length} >>\nstream\n${contentStream}endstream`)
-  addObject(
-    5,
-    `<< /Type /XObject /Subtype /Image /Width ${widthPx} /Height ${heightPx} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>`,
-    jpegBytes,
-  )
-
-  const xrefStart = length
-  pushText(`xref\n0 6\n0000000000 65535 f \n`)
-  for (let i = 1; i <= 5; i += 1) {
-    const offset = offsets[i] ?? 0
-    pushText(`${String(offset).padStart(10, '0')} 00000 n \n`)
-  }
-  pushText(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`)
-  return new Blob(chunks, { type: 'application/pdf' })
-}
-
-const parseDataUrlBase64 = (dataUrl: string): Uint8Array | null => {
-  const commaIndex = dataUrl.indexOf(',')
-  if (commaIndex <= 0) {
-    return null
-  }
-  const b64 = dataUrl.slice(commaIndex + 1)
-  try {
-    const binary = atob(b64)
-    const bytes = new Uint8Array(binary.length)
-    for (let i = 0; i < binary.length; i += 1) {
-      bytes[i] = binary.charCodeAt(i)
-    }
-    return bytes
-  } catch {
-    return null
-  }
-}
-
-const handleExportImage = async () => {
-  exportDialogVisible.value = true
-}
-
-const confirmExportImage = async () => {
-  const canvas = createExportCanvas()
-  if (!canvas) {
-    feedback.error('画布尚未就绪，暂时无法导出')
-    return
-  }
-  try {
-    const sessionName = sanitizeFilename(currentSessionName.value)
-    const stamp = formatNowForFilename()
-    if (exportFormat.value === 'png') {
-      const pngBlob = await blobFromCanvas(canvas, 'image/png', 1)
-      if (!pngBlob) {
-        feedback.error('导出失败：PNG 编码失败')
-        return
-      }
-      downloadBlob(pngBlob, `${sessionName}_${stamp}.png`)
-      feedback.success('已导出 PNG')
-      exportDialogVisible.value = false
-      return
-    }
-
-    if (exportFormat.value === 'svg') {
-      const pngDataUrl = canvas.toDataURL('image/png')
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${canvas.width}" height="${canvas.height}" viewBox="0 0 ${canvas.width} ${canvas.height}"><rect width="100%" height="100%" fill="${canvasBackgroundColor.value}"/><image href="${pngDataUrl}" width="${canvas.width}" height="${canvas.height}" /></svg>`
-      const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
-      downloadBlob(svgBlob, `${sessionName}_${stamp}.svg`)
-      feedback.success('已导出 SVG')
-      exportDialogVisible.value = false
-      return
-    }
-
-    const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.95)
-    const jpegBytes = parseDataUrlBase64(jpegDataUrl)
-    if (!jpegBytes) {
-      feedback.error('导出失败：PDF 编码失败')
-      return
-    }
-    const pdfBlob = buildSimplePdfFromJpegBytes(jpegBytes, canvas.width, canvas.height)
-    downloadBlob(pdfBlob, `${sessionName}_${stamp}.pdf`)
-    feedback.success('已导出 PDF')
-    exportDialogVisible.value = false
-  } catch (error) {
-    feedback.errorFrom(error, '导出失败')
-  }
+  await openInviteDialog()
 }
 
 const handleShowShortcuts = () => {
   shortcutDialogVisible.value = true
 }
 
-const handleShowOperationHistory = () => {
-  void handleOpenOperationTimeline()
-}
-
-const isOperationTimelineTechnicalExpanded = (id: number) => {
-  return operationTimelineTechnicalExpandedIds.value.includes(id)
-}
-
-const toggleOperationTimelineTechnical = (id: number) => {
-  if (isOperationTimelineTechnicalExpanded(id)) {
-    operationTimelineTechnicalExpandedIds.value = operationTimelineTechnicalExpandedIds.value.filter((item) => item !== id)
-    return
-  }
-  operationTimelineTechnicalExpandedIds.value = [...operationTimelineTechnicalExpandedIds.value, id]
-}
-
-const isConflictTechnicalExpanded = (id: number) => {
-  return conflictTechnicalExpandedIds.value.includes(id)
-}
-
-const toggleConflictTechnical = (id: number) => {
-  if (isConflictTechnicalExpanded(id)) {
-    conflictTechnicalExpandedIds.value = conflictTechnicalExpandedIds.value.filter((item) => item !== id)
-    return
-  }
-  conflictTechnicalExpandedIds.value = [...conflictTechnicalExpandedIds.value, id]
-}
-
-const loadOperationTimeline = async () => {
-  if (!sessionKey.value || operationTimelineLoading.value) {
-    return
-  }
-  operationTimelineLoading.value = true
-  try {
-    operationTimeline.value = await sessionApi.getOperationTimeline(sessionKey.value, {
-      ...(typeof operationTimelineFilterFromVersion.value === 'number'
-        ? { fromVersion: operationTimelineFilterFromVersion.value }
-        : {}),
-      ...(typeof operationTimelineFilterToVersion.value === 'number'
-        ? { toVersion: operationTimelineFilterToVersion.value }
-        : {}),
-      ...(typeof operationTimelineFilterUserId.value === 'number' ? { userId: operationTimelineFilterUserId.value } : {}),
-      ...(operationTimelineFilterOperationType.value !== 'all'
-        ? { operationType: operationTimelineFilterOperationType.value }
-        : {}),
-      ...(operationTimelineFilterConflictType.value !== 'all'
-        ? { conflictType: operationTimelineFilterConflictType.value }
-        : {}),
-      page: operationTimelinePage.value,
-      pageSize: operationTimelinePageSize.value,
-    })
-  } catch (error) {
-    feedback.errorFrom(error, '加载操作时间线失败')
-  } finally {
-    operationTimelineLoading.value = false
-  }
-}
-
-const handleOpenOperationTimeline = async () => {
+const handleShowOperationHistory = async () => {
   operationHistoryVisible.value = true
-  operationTimelinePage.value = 1
-  operationTimelineTechnicalExpandedIds.value = []
-  await loadOperationTimeline()
+  await openOperationTimeline()
 }
 
 const handleResetOperationTimelineFilters = async () => {
-  operationTimelineFilterUserId.value = null
-  operationTimelineFilterOperationType.value = 'all'
-  operationTimelineFilterConflictType.value = 'all'
-  operationTimelineFilterFromVersion.value = null
-  operationTimelineFilterToVersion.value = null
-  operationTimelinePage.value = 1
-  operationTimelineTechnicalExpandedIds.value = []
-  await loadOperationTimeline()
+  await resetOperationTimelineFilters()
 }
 
 const handleOperationTimelineSearch = async () => {
-  operationTimelinePage.value = 1
-  await loadOperationTimeline()
+  await searchOperationTimeline()
 }
 
 const handleOperationTimelinePageChange = async (page: number) => {
-  operationTimelinePage.value = page
-  await loadOperationTimeline()
+  await changeOperationTimelinePage(page)
 }
 
 const handleShowConflictHistory = async () => {
@@ -4608,24 +3044,6 @@ const handleShowConflictHistory = async () => {
 const handleShowVersionHistory = async () => {
   versionHistoryVisible.value = true
   await refreshSnapshots()
-}
-
-const handleShowMembersManage = async () => {
-  memberManageDialogVisible.value = true
-  await refreshSessionMembers()
-}
-
-const handleUpdateMemberRole = async (payload: { member: MemberVO; role: 0 | 1 | 2 }) => {
-  if (!sessionKey.value) {
-    return
-  }
-  try {
-    await sessionApi.updateMemberRole(sessionKey.value, payload.member.userId, payload.role)
-    feedback.success(`已将 ${payload.member.username} 设为 ${payload.role === 2 ? 'manager' : payload.role === 1 ? 'editor' : 'viewer'}`)
-    await refreshSessionMembers()
-  } catch (error) {
-    feedback.errorFrom(error, '更新成员角色失败')
-  }
 }
 
 const handleCloseSession = async () => {
@@ -4647,10 +3065,6 @@ const handleCloseSession = async () => {
   }
 }
 
-const handleToggleFocusMode = () => {
-  focusMode.value = !focusMode.value
-}
-
 const handleShowGuide = () => {
   const availableSteps = baseOnboardingSteps.filter((step) => {
     const element = document.querySelector(step.selector)
@@ -4668,10 +3082,6 @@ const tryOpenOnboardingOnFirstVisit = () => {
     handleShowGuide()
     markOnboardingSeen()
   })
-}
-
-const handleShowBackground = () => {
-  backgroundDialogVisible.value = true
 }
 
 const handleBackToList = async () => {
@@ -4698,106 +3108,13 @@ const updateHistoryToggle = async (value: boolean) => {
 }
 
 const onVisibilityChange = () => {
+  lifecycleOnVisibilityChange()
   if (document.visibilityState === 'visible') {
-    startHeartbeat()
     lastSelectionBroadcastSignature.value = ''
     broadcastSelectionPresence(true)
     void refreshSessionMembers()
     return
   }
-  clearHeartbeat()
-}
-
-const loadInviteList = async () => {
-  if (!sessionKey.value) {
-    return
-  }
-  inviteListLoading.value = true
-  try {
-    const result = await sessionApi.getInviteList(sessionKey.value)
-    inviteList.value = result.list
-  } catch (error) {
-    feedback.errorFrom(error, '加载邀请码失败')
-  } finally {
-    inviteListLoading.value = false
-  }
-}
-
-const handleCreateInvite = async (payload: { role: 0 | 1 | 2 }) => {
-  if (!sessionKey.value) {
-    return
-  }
-  inviteDialogLoading.value = true
-  try {
-    await sessionApi.createInvite(sessionKey.value, payload.role)
-    feedback.success('邀请码创建成功')
-    await loadInviteList()
-  } catch (error) {
-    feedback.errorFrom(error, '创建邀请码失败')
-  } finally {
-    inviteDialogLoading.value = false
-  }
-}
-
-const copyInviteLinkText = async (invitePath?: string) => {
-  if (!invitePath) {
-    feedback.warning('邀请码链接缺失')
-    return
-  }
-  const isAbsolute = /^https?:\/\//i.test(invitePath)
-  const link = isAbsolute ? invitePath : `${window.location.origin}${invitePath}`
-  await navigator.clipboard.writeText(link)
-}
-
-const handleCopyInvite = async (invite: SessionInviteItemVO) => {
-  try {
-    await copyInviteLinkText(invite.invitePath)
-    feedback.success('邀请码链接已复制')
-  } catch {
-    feedback.error('复制失败，请稍后重试')
-  }
-}
-
-const handleShowInviteQr = async (invite: SessionInviteItemVO) => {
-  if (!invite.invitePath) {
-    feedback.warning('邀请码链接缺失')
-    return
-  }
-  const isAbsolute = /^https?:\/\//i.test(invite.invitePath)
-  shareQrcodePendingLink.value = isAbsolute ? invite.invitePath : `${window.location.origin}${invite.invitePath}`
-  shareQrcodeVisible.value = true
-}
-
-const handleRevokeInvite = async (invite: SessionInviteItemVO) => {
-  if (!sessionKey.value) {
-    return
-  }
-  try {
-    const confirmed = await confirmDanger('确认作废该邀请码吗？', '邀请码作废', { confirmButtonText: '确认作废' })
-    if (!confirmed) {
-      return
-    }
-    await sessionApi.revokeInvite(sessionKey.value, invite.id)
-    feedback.success('邀请码已作废')
-    await loadInviteList()
-  } catch (error) {
-    feedback.errorFrom(error, '作废邀请码失败')
-  }
-}
-
-const handleToggleGrid = () => {
-  showGrid.value = !showGrid.value
-  scheduleRender()
-}
-
-const applyCanvasBackgroundColor = (value: string) => {
-  const normalized = normalizeHexColor(value)
-  if (!normalized) {
-    return
-  }
-  canvasBackgroundColor.value = normalized
-  saveCanvasBackgroundColor(normalized)
-  scheduleRender()
 }
 
 const handleTogglePaused = async () => {
@@ -4820,6 +3137,7 @@ const handleTogglePaused = async () => {
   }
 }
 
+// 图片默认插入点：优先当前视口中心，保证用户一眼可见。
 const pickImageInsertPoint = () => {
   const canvas = canvasRef.value
   if (!canvas) {
@@ -4935,579 +3253,68 @@ const findMemberNameByUserId = (userId: number | null): string | null => {
   return null
 }
 
-const formatOperationTypeLabel = (operationType: OperationHistoryItem['operationType']) => {
-  switch (operationType) {
-    case 'create_graphic':
-      return '创建图元'
-    case 'update_graphic':
-      return '更新图元'
-    case 'delete_graphic':
-      return '删除图元'
-    case 'undo':
-      return '撤销'
-    case 'redo':
-      return '重做'
-    default:
-      return operationType
-  }
-}
-
-const formatOperationSourceLabel = (source: OperationHistorySource) => {
-  switch (source) {
-    case 'local':
-      return '本地'
-    case 'remote':
-      return '协同'
-    case 'system':
-      return '系统'
-    default:
-      return source
-  }
-}
-
-const canLocateHistoryObject = (objectKey: string) => {
-  if (!objectKey) {
-    return false
-  }
-  return canvasStore.graphics.some((item) => item.objectKey === objectKey)
-}
-
-const locateHistoryObject = (item: OperationHistoryItem) => {
-  if (!item.objectKey) {
-    feedback.warning('该记录没有关联图元对象')
-    return
-  }
-  const target = canvasStore.graphics.find((graphic) => graphic.objectKey === item.objectKey)
-  if (!target) {
-    feedback.warning('该图元已不存在，无法定位')
-    return
-  }
-
-  const canvas = canvasRef.value
-  if (canvas) {
-    const bounds = getGraphicBounds(target)
-    const centerX = bounds.x + bounds.width / 2
-    const centerY = bounds.y + bounds.height / 2
-    viewportOffset.value = {
-      x: canvas.width / (2 * zoomScale.value) - centerX,
-      y: canvas.height / (2 * zoomScale.value) - centerY,
-    }
-  }
-
-  selectedObjectKey.value = target.objectKey
-  focusedObjectKey.value = target.objectKey
-  if (focusHighlightTimer !== null) {
-    window.clearTimeout(focusHighlightTimer)
-  }
-  focusHighlightTimer = window.setTimeout(() => {
-    focusedObjectKey.value = null
-    focusHighlightTimer = null
-    scheduleRender()
-  }, 3000)
-  scheduleRender()
-}
-
-const locateTimelineObject = (item: SessionOperationItemVO) => {
-  locateHistoryObject({
-    id: String(item.id),
-    operationType: item.operationType === 'create' ? 'create_graphic' : item.operationType === 'update' ? 'update_graphic' : 'delete_graphic',
-    objectKey: item.objectKey,
-    userId: item.userId,
-    userLabel: '',
-    source: 'system',
-    timestamp: item.timestamp,
-    timeText: new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour12: false }),
-  })
-}
-
-const locateConflictObject = (item: SessionConflictLogItemVO) => {
-  const fields = item.fieldName ? [formatFieldNameLabel(item.fieldName)] : []
-  locateHistoryObject({
-    id: `conflict_${item.id}`,
-    operationType: 'update_graphic',
-    objectKey: item.objectKey,
-    userId: null,
-    userLabel: '',
-    source: 'system',
-    timestamp: Date.now(),
-    timeText: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-  })
-  if (canvasStore.graphics.some((graphic) => graphic.objectKey === item.objectKey)) {
-    conflictFocusMap.value[item.objectKey] = {
-      fields,
-      updatedAt: Date.now(),
-    }
-    conflictHistoryVisible.value = false
-    scheduleRender()
-  }
-}
-
-const pushOperationHistory = (payload: {
-  operationType: OperationHistoryItem['operationType']
-  objectKey: string
-  userId: number | null
-  source: OperationHistorySource
-  detail?: string
-}) => {
-  const now = Date.now()
-  const userName = findMemberNameByUserId(payload.userId)
-  const labelPrefix = formatOperationTypeLabel(payload.operationType)
-  const userLabel = userName ? `${labelPrefix} · ${userName}` : labelPrefix
-  const item: OperationHistoryItem = {
-    id: `${now}_${Math.random().toString(36).slice(2, 8)}`,
-    operationType: payload.operationType,
-    objectKey: payload.objectKey,
-    userId: payload.userId,
-    userLabel,
-    source: payload.source,
-    ...(payload.detail ? { detail: payload.detail } : {}),
-    timestamp: now,
-    timeText: new Date(now).toLocaleTimeString('zh-CN', { hour12: false }),
-  }
-  operationHistory.value = [item, ...operationHistory.value].slice(0, 20)
-}
-
-const formatSessionOperationTypeLabel = (operationType: SessionOperationType) => {
-  if (operationType === 'create') {
-    return '创建图元'
-  }
-  if (operationType === 'update') {
-    return '更新图元'
-  }
-  return '删除图元'
-}
-
-const formatOperationActorLabel = (userId: number) => {
-  return findMemberNameByUserId(userId) || `用户 ${userId}`
-}
-
-const formatFieldNamesText = (fields: string[]) => {
-  return fields.length > 0 ? fields.join(', ') : '-'
-}
-
-const formatObjectTypeLabel = (value: unknown) => {
-  const type = typeof value === 'string' ? value : ''
-  const map: Record<string, string> = {
-    rect: '矩形',
-    circle: '圆形',
-    ellipse: '椭圆',
-    line: '直线',
-    path: '路径',
-    text: '文本',
-    image: '图片',
-  }
-  return map[type] ?? (type || '图元')
-}
-
-const timelineUpdateFieldOrder: string[] = [
-  'positionX',
-  'positionY',
-  'width',
-  'height',
-  'rotation',
-  'pathPoints',
-  'strokeColor',
-  'fillColor',
-  'strokeWidth',
-  'lineStyle',
-  'textContent',
-  'fontSize',
-  'zIndex',
-  'isLocked',
-]
-
-const extractTimelineUpdateFieldKeys = (item: SessionOperationItemVO): string[] => {
-  const payload = isRecord(item.operationData) ? item.operationData : {}
-  const fromPayload = timelineUpdateFieldOrder.filter((key) => typeof payload[key] !== 'undefined')
-  if (fromPayload.length > 0) {
-    return fromPayload
-  }
-  const applied = getResolvedFieldList(item, 'appliedFields')
-  return timelineUpdateFieldOrder.filter((key) => applied.includes(key))
-}
-
-const getResolvedFieldList = (item: SessionOperationItemVO, key: 'appliedFields' | 'rejectedFields') => {
-  if (!item.resolvedResult || typeof item.resolvedResult !== 'object') {
-    return [] as string[]
-  }
-  const resolved = item.resolvedResult as Record<string, unknown>
-  const value = resolved[key]
-  if (!Array.isArray(value)) {
-    return [] as string[]
-  }
-  return value.map((entry) => String(entry)).filter((entry) => entry.length > 0)
-}
-
-const isRestoreTimelineEvent = (item: SessionOperationItemVO): boolean => {
-  const payload = isRecord(item.operationData) ? item.operationData : {}
-  return payload.__systemEvent === 'restore_version'
-}
-
-const getRestoreTimelineMeta = (item: SessionOperationItemVO) => {
-  const payload = isRecord(item.operationData) ? item.operationData : {}
-  const resolved = isRecord(item.resolvedResult) ? item.resolvedResult : {}
-  const targetVersion = parseNumber(payload.targetVersion ?? resolved.targetVersion, 0)
-  const previousVersion = parseNumber(payload.previousVersion ?? resolved.previousVersion ?? item.baseVersion, item.baseVersion)
-  const restoredVersion = parseNumber(payload.restoredVersion ?? resolved.restoredVersion ?? item.serverVersion, item.serverVersion)
-  const createdCount = parseNumber(payload.createdCount ?? resolved.createdCount, 0)
-  const updatedCount = parseNumber(payload.updatedCount ?? resolved.updatedCount, 0)
-  const deletedCount = parseNumber(payload.deletedCount ?? resolved.deletedCount, 0)
-  return {
-    targetVersion,
-    previousVersion,
-    restoredVersion,
-    createdCount,
-    updatedCount,
-    deletedCount,
-  }
-}
-
-const formatTimelineActivityText = (item: SessionOperationItemVO) => {
-  const actor = formatOperationActorLabel(item.userId)
-  const payload = isRecord(item.operationData) ? item.operationData : {}
-  const resolved = isRecord(item.resolvedResult) ? item.resolvedResult : {}
-  const resolvedGraphic = isRecord(resolved.graphic) ? resolved.graphic : {}
-  const objectType = formatObjectTypeLabel(payload.objectType ?? resolvedGraphic.objectType)
-
-  if (isRestoreTimelineEvent(item)) {
-    const meta = getRestoreTimelineMeta(item)
-    return `${actor} 恢复到历史版本 V${meta.targetVersion}（V${meta.previousVersion} → V${meta.restoredVersion}）`
-  }
-
-  if (item.operationType === 'create') {
-    return `${actor} 创建了${objectType}（${item.objectKey || '对象'}）`
-  }
-  if (item.operationType === 'delete') {
-    return `${actor} 删除了${objectType}（${item.objectKey || '对象'}）`
-  }
-
-  const updateFields = extractTimelineUpdateFieldKeys(item)
-    .map((field) => formatFieldNameLabel(field))
-    .filter((field, index, arr) => field && arr.indexOf(field) === index)
-
-  if (updateFields.length === 0) {
-    return `${actor} 更新了${objectType}（${item.objectKey || '对象'}）`
-  }
-  return `${actor} 更新了${objectType}（${item.objectKey || '对象'}），更新字段：${updateFields.join('、')}`
-}
-
-const formatTimelineConflictHint = (item: SessionOperationItemVO) => {
-  if (isRestoreTimelineEvent(item)) {
-    const meta = getRestoreTimelineMeta(item)
-    return `恢复结果：新增 ${meta.createdCount}，更新 ${meta.updatedCount}，删除 ${meta.deletedCount}。`
-  }
-  if (item.conflictType === 'none') {
-    return '该操作未触发冲突。'
-  }
-  const applied = formatFieldNamesText(getResolvedFieldList(item, 'appliedFields'))
-  const rejected = formatFieldNamesText(getResolvedFieldList(item, 'rejectedFields'))
-  return `冲突类型：${formatConflictTypeLabel(item.conflictType)}；采用字段：${applied}；拒绝字段：${rejected}`
-}
-
-const formatResolveReasonLabel = (value: unknown) => {
-  if (typeof value === 'string' && value.trim().length > 0) {
-    return value
-  }
-  return '-'
-}
-
-const formatConflictTypeLabel = (conflictType: CollaborationConflictType) => {
-  if (conflictType === 'none') {
-    return '无冲突'
-  }
-  if (conflictType === 'field_merge') {
-    return '字段合并'
-  }
-  if (conflictType === 'field_conflict') {
-    return '字段冲突'
-  }
-  if (conflictType === 'delete_wins') {
-    return '删除优先'
-  }
-  return '重复操作'
-}
-
-const formatFieldNameLabel = (field: string) => {
-  const map: Record<string, string> = {
-    positionX: 'X坐标',
-    positionY: 'Y坐标',
-    width: '宽度',
-    height: '高度',
-    strokeColor: '描边颜色',
-    fillColor: '填充颜色',
-    strokeWidth: '线宽',
-    lineStyle: '线型',
-    textContent: '文本内容',
-    fontSize: '字体大小',
-    pathPoints: '路径点',
-    zIndex: '图层',
-    rotation: '旋转角度',
-    isLocked: '锁定状态',
-  }
-  return map[field] ?? field
-}
-
-const formatConflictResolveStrategyLabel = (strategy: string) => {
-  if (!strategy) {
-    return '-'
-  }
-  return strategy
-}
-
-const formatConflictValue = (value: unknown): string => {
-  if (value === null || typeof value === 'undefined') {
-    return '-'
-  }
-  if (typeof value === 'string') {
-    return value
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value)
-  }
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return '[复杂对象]'
-  }
-}
-
-const formatConflictLogSummary = (item: SessionConflictLogItemVO) => {
-  const field = formatFieldNameLabel(item.fieldName || '-')
-  const strategy = formatConflictResolveStrategyLabel(item.resolveStrategy)
-  if (item.conflictType === 'field_merge') {
-    return `字段 ${field} 与并发修改可合并，已采用传入值。`
-  }
-  if (item.conflictType === 'field_conflict') {
-    return `字段 ${field} 发生并发冲突，系统已按 ${strategy} 选择最终值。`
-  }
-  if (item.conflictType === 'delete_wins') {
-    return `目标图元已被删除，本次字段 ${field} 的修改未生效（删除优先）。`
-  }
-  if (item.conflictType === 'duplicate_operation') {
-    return `检测到重复操作提交，系统已按幂等策略忽略重复执行。`
-  }
-  return `字段 ${field} 无冲突，按策略 ${strategy} 正常处理。`
-}
-
-const refreshConflictLogs = async (forceFromStart = false) => {
-  if (!sessionKey.value) {
-    return
-  }
-  if (loadingConflictLogs.value) {
-    return
-  }
-  loadingConflictLogs.value = true
-  try {
-    const sinceId = forceFromStart ? 0 : conflictSinceId.value
-    const result = await sessionApi.getConflictLogs(sessionKey.value, sinceId, 100)
-    if (forceFromStart) {
-      conflictLogs.value = result.conflicts
-    } else {
-      conflictLogs.value = [...conflictLogs.value, ...result.conflicts]
-    }
-    const maxId = result.conflicts.reduce((max, item) => Math.max(max, item.id), forceFromStart ? 0 : conflictSinceId.value)
-    conflictSinceId.value = maxId
-  } catch (error) {
-    feedback.errorFrom(error, '加载冲突日志失败')
-  } finally {
-    loadingConflictLogs.value = false
-  }
-}
-
-const refreshSnapshots = async (force = false) => {
-  if (!sessionKey.value || (loadingSnapshots.value && !force)) {
-    return
-  }
-  loadingSnapshots.value = true
-  try {
-    const result = await sessionApi.getSnapshots(sessionKey.value, 20)
-    snapshots.value = result.snapshots
-  } catch (error) {
-    feedback.errorFrom(error, '加载版本快照失败')
-  } finally {
-    loadingSnapshots.value = false
-  }
-  currentSnapshotVersion.value = snapshots.value.length > 0 ? (snapshots.value[0]?.version ?? null) : null
-}
-
-const createSnapshotNow = async () => {
-  if (!sessionKey.value || loadingSnapshots.value) {
-    return
-  }
-  try {
-    const defaultName = `${currentSessionName.value || '未命名会话'}_V${currentVersion.value}_${formatNowForFilename()}`
-    const promptResult = await ElMessageBox.prompt('请输入快照名称（可留空）', '创建快照', {
-      confirmButtonText: '创建',
-      cancelButtonText: '取消',
-      inputValue: defaultName,
-      inputPlaceholder: '例如：联调前快照 / 答辩演示快照',
-      closeOnClickModal: false,
-    }).catch((error) => {
-      if (error === 'cancel' || error === 'close') {
-        return null
-      }
-      throw error
-    })
-    if (!promptResult) {
-      return
-    }
-
-    const snapshotNameRaw = promptResult.value
-    const snapshotName = typeof snapshotNameRaw === 'string' ? snapshotNameRaw.trim() : ''
-
-    loadingSnapshots.value = true
-    await sessionApi.createSnapshot(sessionKey.value, snapshotName || undefined)
-    feedback.success('已创建版本快照')
-    await refreshSnapshots(true)
-  } catch (error) {
-    feedback.errorFrom(error, '创建快照失败')
-  } finally {
-    loadingSnapshots.value = false
-  }
-}
-
-const restoreToVersion = async (targetVersion: number) => {
-  if (!sessionKey.value || replayLoading.value) {
-    return
-  }
-  const confirmed = await confirmDanger(
-    `确认恢复到版本 V${targetVersion} 吗？该操作会按目标版本内容覆盖当前画布状态，并生成新的恢复记录。`,
-    '恢复快照确认',
-    {
-      confirmButtonText: '确认恢复',
-      cancelButtonText: '取消',
+const {
+  operationHistory,
+  operationHistoryForDisplay,
+  formatOperationTypeLabel,
+  formatOperationSourceLabel,
+  canLocateHistoryObject,
+  locateHistoryObject,
+  locateTimelineObject,
+  locateConflictObject,
+  pushOperationHistory,
+} = useOperationHistory({
+  graphicsRef: computed(() => canvasStore.graphics),
+  selectedObjectKeyRef: selectedObjectKey,
+  selectedObjectKeysRef: selectedObjectKeys,
+  focusedObjectKeyRef: focusedObjectKey,
+  conflictFocusMapRef: conflictFocusMap,
+  conflictHistoryVisibleRef: conflictHistoryVisible,
+  focusHighlightTimerRef: computed({
+    get: () => focusHighlightTimer,
+    set: (value) => {
+      focusHighlightTimer = value
     },
-  )
-  if (!confirmed) {
-    return
-  }
-  replayLoading.value = true
-  replayTargetVersion.value = targetVersion
-  try {
-    const result = await sessionApi.restoreVersion(sessionKey.value, targetVersion)
-    await syncGraphicsFromServer(true)
-    await refreshSnapshots()
-    updateSessionVersion(result.restoredVersion)
-    feedback.success(
-      `已恢复到版本 ${targetVersion}，当前版本 ${result.restoredVersion}（创建 ${result.createdCount}，更新 ${result.updatedCount}，删除 ${result.deletedCount}）`,
-    )
-  } catch (error) {
-    feedback.errorFrom(error, '版本恢复失败')
-  } finally {
-    replayLoading.value = false
-    replayTargetVersion.value = null
-  }
-}
+  }),
+  canvasRef,
+  zoomScaleRef: zoomScale,
+  viewportOffsetRef: viewportOffset,
+  findMemberNameByUserId,
+  formatFieldNameLabel,
+  getGraphicBounds,
+  scheduleRender,
+  onWarning: (message) => feedback.warning(message),
+})
 
-const convertUnknownGraphicToGraphicVO = (source: Record<string, unknown>): GraphicVO | null => {
-  const objectKey = parseString(source.objectKey)
-  if (!objectKey) {
-    return null
-  }
-  const objectTypeRaw = parseString(source.objectType, 'line')
-  const objectType =
-    objectTypeRaw === 'line' ||
-    objectTypeRaw === 'rect' ||
-    objectTypeRaw === 'circle' ||
-    objectTypeRaw === 'text' ||
-    objectTypeRaw === 'path' ||
-    objectTypeRaw === 'image'
-      ? objectTypeRaw
-      : 'line'
-  const pathPoints = toOperationPathPoints(source.pathPoints)
-  return {
-    id: parseNumber(source.id),
-    sessionId: parseNumber(source.sessionId, sessionInfo.value?.sessionId ?? 0),
-    objectKey,
-    objectType,
-    positionX: parseNumber(source.positionX),
-    positionY: parseNumber(source.positionY),
-    width: typeof source.width === 'number' ? source.width : null,
-    height: typeof source.height === 'number' ? source.height : null,
-    strokeColor: parseString(source.strokeColor, '#000000'),
-    lineStyle: source.lineStyle === 'dashed' ? 'dashed' : 'solid',
-    fillColor: typeof source.fillColor === 'string' ? source.fillColor : null,
-    strokeWidth: parseNumber(source.strokeWidth, 1),
-    textContent: typeof source.textContent === 'string' ? source.textContent : null,
-    fontSize: typeof source.fontSize === 'number' ? source.fontSize : null,
-    pathPoints,
-    isLocked: source.isLocked === true || source.isLocked === 1,
-    rotation: parseNumber(source.rotation),
-    zIndex: parseNumber(source.zIndex),
-    version: parseNumber(source.version),
-    creatorId: parseNumber(source.creatorId),
-    createdAt: parseString(source.createdAt, new Date().toISOString()),
-    updatedAt: parseString(source.updatedAt, new Date().toISOString()),
-  }
-}
+const {
+  refreshSnapshots,
+  createSnapshotNow,
+  restoreToVersion,
+  applyReplayToCanvas,
+} = useVersionSnapshots({
+  getSessionKey: () => sessionKey.value,
+  getCurrentSessionName: () => currentSessionName.value,
+  getCurrentVersion: () => currentVersion.value,
+  formatNowForFilename,
+  loadingSnapshotsRef: loadingSnapshots,
+  replayLoadingRef: replayLoading,
+  replayTargetVersionRef: replayTargetVersion,
+  snapshotsRef: snapshots,
+  currentSnapshotVersionRef: currentSnapshotVersion,
+  isRecord,
+  toGraphicFromUnknown,
+  toOperationPathPoints,
+  setGraphics: (graphics) => {
+    canvasStore.graphics = graphics
+  },
+  syncGraphicsFromServer,
+  updateSessionVersion,
+  scheduleRender,
+})
 
-const applyReplayToCanvas = async (targetVersion: number) => {
-  if (!sessionKey.value || replayLoading.value) {
-    return
-  }
-  replayLoading.value = true
-  replayTargetVersion.value = targetVersion
-  try {
-    const replay = await sessionApi.getReplay(sessionKey.value, targetVersion)
-    const replayMap = new Map<string, GraphicVO>()
-    const baseGraphics = replay.baseSnapshotData?.graphics ?? []
-    baseGraphics.forEach((item) => {
-      if (isRecord(item)) {
-        const next = convertUnknownGraphicToGraphicVO(item)
-        if (next) {
-          replayMap.set(next.objectKey, next)
-        }
-      }
-    })
-
-    replay.operations.forEach((op) => {
-      if (op.operationType === 'delete') {
-        replayMap.delete(op.objectKey)
-        return
-      }
-      const resolvedGraphic = isRecord(op.resolvedResult?.graphic) ? convertUnknownGraphicToGraphicVO(op.resolvedResult.graphic) : null
-      if (resolvedGraphic) {
-        replayMap.set(resolvedGraphic.objectKey, resolvedGraphic)
-        return
-      }
-      const current = replayMap.get(op.objectKey)
-      if (!current) {
-        return
-      }
-      const patch = isRecord(op.operationData) ? op.operationData : {}
-      const updated: GraphicVO = {
-        ...current,
-        positionX: typeof patch.positionX === 'number' ? patch.positionX : current.positionX,
-        positionY: typeof patch.positionY === 'number' ? patch.positionY : current.positionY,
-        width: typeof patch.width === 'number' ? patch.width : current.width,
-        height: typeof patch.height === 'number' ? patch.height : current.height,
-        strokeColor: typeof patch.strokeColor === 'string' ? patch.strokeColor : current.strokeColor,
-        lineStyle: patch.lineStyle === 'dashed' ? 'dashed' : (patch.lineStyle === 'solid' ? 'solid' : current.lineStyle),
-        fillColor: typeof patch.fillColor === 'string' || patch.fillColor === null ? patch.fillColor : current.fillColor,
-        strokeWidth: typeof patch.strokeWidth === 'number' ? patch.strokeWidth : current.strokeWidth,
-        textContent: typeof patch.textContent === 'string' ? patch.textContent : current.textContent,
-        fontSize: typeof patch.fontSize === 'number' ? patch.fontSize : current.fontSize,
-        pathPoints: toOperationPathPoints(patch.pathPoints) ?? current.pathPoints,
-        isLocked: typeof patch.isLocked === 'boolean' ? patch.isLocked : current.isLocked,
-        rotation: typeof patch.rotation === 'number' ? patch.rotation : current.rotation,
-        zIndex: typeof patch.zIndex === 'number' ? patch.zIndex : current.zIndex,
-        version: op.serverVersion,
-      }
-      replayMap.set(op.objectKey, updated)
-    })
-
-    canvasStore.graphics = Array.from(replayMap.values()).sort((a, b) => a.zIndex - b.zIndex)
-    updateSessionVersion(targetVersion)
-    scheduleRender()
-    feedback.success(`已回放到版本 ${targetVersion}`)
-  } catch (error) {
-    feedback.errorFrom(error, '版本回放失败')
-  } finally {
-    replayLoading.value = false
-    replayTargetVersion.value = null
-  }
-}
-
+// ------------------------------
+// 客户端操作构建与发送
+// ------------------------------
 const buildLocalOperation = (
   operationType: OperationVO['operationType'],
   objectKey: string,
@@ -5525,6 +3332,7 @@ const buildLocalOperation = (
   }
 }
 
+// 发送创建操作：携带 Lamport、operationId、batch 元数据。
 const sendCreateGraphic = (graphic: GraphicVO) => {
   if (!wsClient || !canvasStore.currentSession) {
     return
@@ -5571,6 +3379,7 @@ const sendCreateGraphic = (graphic: GraphicVO) => {
   recordUndoStep(1)
 }
 
+// 发送更新操作：若图元仍在 pending create，则先入延迟队列等待创建确认。
 const sendUpdateGraphicPatch = (objectKey: string, patch: NonNullable<import('@/ws/types').UpdateGraphicData['patch']>) => {
   if (!wsClient || !canvasStore.currentSession) {
     return
@@ -5616,6 +3425,7 @@ const sendUpdateGraphicPatch = (objectKey: string, patch: NonNullable<import('@/
   recordPatchOperation()
 }
 
+// 发送删除操作：支持批量分组，保证撤销/日志可按一次动作聚合。
 const sendDeleteGraphicByObjectKey = (objectKey: string) => {
   const session = canvasStore.currentSession
   const client = wsClient
@@ -5657,6 +3467,7 @@ const sendDeleteGraphicByObjectKey = (objectKey: string) => {
   return true
 }
 
+// 删除当前选中（单选/多选），并同步处理本地选择状态。
 const deleteSelectedGraphic = () => {
   const selectedList = selectedGraphics.value
   if (selectedList.length === 0 || !wsClient || !canvasStore.currentSession) {
@@ -5683,6 +3494,7 @@ const deleteSelectedGraphic = () => {
   selectedObjectKey.value = null
 }
 
+// 锁定切换：多选 mixed 态点击后统一切到“全锁/全解锁”。
 const handleToggleLock = () => {
   if (isReadOnly.value || selectedGraphics.value.length === 0) {
     return
@@ -5823,6 +3635,7 @@ const handleSendBackward = () => {
   swapGraphicZIndex(selected, lower)
 }
 
+// 根据草稿状态生成最终图元对象（鼠标抬起时提交）。
 const buildGraphicFromDraft = (): GraphicVO | null => {
   if (!canvasStore.currentSession) {
     return null
@@ -5944,6 +3757,7 @@ const commitTextEditing = () => {
   cancelTextEditing()
 }
 
+// 鼠标按下：根据当前工具与命中目标，进入拖拽/缩放/旋转/框选/绘制等分支。
 const handleMouseDown = (event: MouseEvent) => {
   if (textEditing.value) {
     return
@@ -6063,7 +3877,7 @@ const handleMouseDown = (event: MouseEvent) => {
       }
     }
 
-    const target = pickGraphic(point)
+    const target = pickGraphicAtPoint(point)
     const additive = event.shiftKey || event.ctrlKey || event.metaKey
     if (target) {
       if (additive) {
@@ -6168,7 +3982,7 @@ const handleCanvasClick = (event: MouseEvent) => {
   if (!point) {
     return
   }
-  const target = pickGraphic(point)
+  const target = pickGraphicAtPoint(point)
   if (target?.objectType === 'text') {
     selectedObjectKey.value = target.objectKey
     selectedObjectKeys.value = [target.objectKey]
@@ -6179,6 +3993,7 @@ const handleCanvasClick = (event: MouseEvent) => {
   createTextGraphic(point)
 }
 
+// 双击文本图元进入编辑态。
 const handleCanvasDblClick = (event: MouseEvent) => {
   if (textEditing.value || activeTool.value !== 'select' || panState.value.active || panMode.value) {
     return
@@ -6187,7 +4002,7 @@ const handleCanvasDblClick = (event: MouseEvent) => {
   if (!point) {
     return
   }
-  const target = pickGraphic(point)
+  const target = pickGraphicAtPoint(point)
   if (target?.objectType === 'text') {
     selectedObjectKey.value = target.objectKey
     selectedObjectKeys.value = [target.objectKey]
@@ -6196,6 +4011,7 @@ const handleCanvasDblClick = (event: MouseEvent) => {
   }
 }
 
+// 鼠标移动：推进当前交互状态（拖拽/缩放/旋转/草稿），并触发局部同步。
 const handleMouseMove = (event: MouseEvent) => {
   if (panState.value.active) {
     const dx = (event.clientX - panState.value.start.x) / zoomScale.value
@@ -6410,6 +4226,7 @@ const handleMouseMove = (event: MouseEvent) => {
   scheduleRender()
 }
 
+// 鼠标抬起：提交本次交互（含批处理收口、历史步数记录、状态复位）。
 const handleMouseUp = () => {
   pointerPressed.value = false
   window.setTimeout(() => {
@@ -6720,6 +4537,7 @@ const handleMouseUp = () => {
   sendCreateGraphic(graphic)
 }
 
+// 鼠标离开画布时，确保交互状态安全收尾，避免“卡拖拽”。
 const handleMouseLeave = () => {
   pointerPressed.value = false
   if (panState.value.active) {
@@ -6763,6 +4581,7 @@ const handleMouseLeave = () => {
 }
 
 
+// 撤销：按本地记录的步数分组执行，保证批量操作一次撤销。
 const handleUndo = async () => {
   if (isReadOnly.value) {
     return
@@ -6783,6 +4602,7 @@ const handleUndo = async () => {
   redoStepCounts.value = [...redoStepCounts.value, Math.max(1, popped)]
 }
 
+// 重做：与撤销同样按分组步数回放。
 const handleRedo = async () => {
   if (isReadOnly.value) {
     return
@@ -6807,6 +4627,7 @@ const clampZoomPercent = (value: number) => {
   return Math.max(25, Math.min(200, value))
 }
 
+// Ctrl/Meta + 滚轮缩放，普通滚轮按浏览器默认滚动容器处理。
 const handleWheel = (event: WheelEvent) => {
   const canvas = canvasRef.value
   if (!canvas) {
@@ -6834,117 +4655,35 @@ const handleWheel = (event: WheelEvent) => {
   }
 }
 
-const handleKeydown = (event: KeyboardEvent) => {
-  if (textEditing.value) {
-    if (event.key === 'Enter') {
-      event.preventDefault()
-      commitTextEditing()
-      return
-    }
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      cancelTextEditing()
-      return
-    }
-    return
-  }
-
-  if (isInputTarget(event.target)) {
-    return
-  }
-
-  if (event.key === 'Delete') {
-    event.preventDefault()
-    deleteSelectedGraphic()
-    return
-  }
-
-  if (!event.ctrlKey && !event.metaKey) {
-    if (event.key === 'Escape' && focusMode.value) {
-      event.preventDefault()
-      handleToggleFocusMode()
-      return
-    }
-    return
-  }
-
-  const key = event.key.toLowerCase()
-  if (key === 'c') {
-    if (selectedGraphics.value.length > 0) {
-      event.preventDefault()
-      clipboardGraphics.value = selectedGraphics.value.map((item) => ({
-        ...item,
-        pathPoints: item.pathPoints ? item.pathPoints.map((p) => ({ x: p.x, y: p.y })) : null,
-      }))
-      pasteCount.value = 0
-      feedback.success(`已复制 ${clipboardGraphics.value.length} 个图元`)
-    }
-    return
-  }
-  if (key === 'v') {
-    if (!isReadOnly.value && clipboardGraphics.value.length > 0 && canvasStore.currentSession) {
-      event.preventDefault()
-      pasteCount.value += 1
-      const offset = 24 * pasteCount.value
-      const created: GraphicVO[] = clipboardGraphics.value.map((item, idx) => {
-        const key = generateGraphicObjectKey()
-        const next: GraphicVO = {
-          ...item,
-          id: 0,
-          objectKey: key,
-          sessionId: canvasStore.currentSession?.sessionId ?? item.sessionId,
-          positionX: item.positionX + offset,
-          positionY: item.positionY + offset,
-          pathPoints: item.pathPoints
-            ? item.pathPoints.map((p) => ({ x: p.x + offset, y: p.y + offset }))
-            : null,
-          zIndex: canvasStore.graphics.length + idx + 1,
-          creatorId: currentUserId.value ?? 0,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        }
-        return next
-      })
-      beginWsBatch(created.length, 'multi_paste')
-      try {
-        created.forEach((item) => {
-          upsertGraphic(item)
-          sendCreateGraphic(item)
-        })
-      } finally {
-        endWsBatch()
-      }
-      if (created.length > 1) {
-        const stack = [...undoStepCounts.value]
-        stack.splice(Math.max(0, stack.length - created.length), created.length, created.length)
-        undoStepCounts.value = stack
-      }
-      selectedObjectKeys.value = created.map((item) => item.objectKey)
-      selectedObjectKey.value = selectedObjectKeys.value[selectedObjectKeys.value.length - 1] ?? null
-      feedback.success(`已粘贴 ${created.length} 个图元`)
-    }
-    return
-  }
-  if (key === 'z' && event.shiftKey) {
-    event.preventDefault()
-    void handleRedo()
-    return
-  }
-  if (key === 'z') {
-    event.preventDefault()
-    void handleUndo()
-    return
-  }
-  if (key === 'y') {
-    event.preventDefault()
-    void handleRedo()
-    return
-  }
-  if (key === 'l') {
-    event.preventDefault()
-    handleToggleLock()
-  }
-}
+const { handleKeydown } = useCanvasKeyboard({
+  textEditingRef: textEditing,
+  focusModeRef: focusMode,
+  isReadOnlyRef: isReadOnly,
+  clipboardGraphicsRef: clipboardGraphics,
+  pasteCountRef: pasteCount,
+  selectedGraphicsRef: selectedGraphics,
+  selectedObjectKeysRef: selectedObjectKeys,
+  selectedObjectKeyRef: selectedObjectKey,
+  canvasStoreRef: computed(() => ({
+    currentSession: canvasStore.currentSession,
+    graphics: canvasStore.graphics,
+  })),
+  currentUserIdRef: currentUserId,
+  undoStepCountsRef: undoStepCounts,
+  commitTextEditing,
+  cancelTextEditing,
+  isInputTarget,
+  deleteSelectedGraphic,
+  handleToggleFocusMode,
+  beginWsBatch,
+  endWsBatch,
+  upsertGraphic,
+  sendCreateGraphic,
+  handleUndo,
+  handleRedo,
+  handleToggleLock,
+  onSuccess: (message) => feedback.success(message),
+})
 
 const handleRetryConnect = () => {
   if (!wsClient) {
@@ -6956,61 +4695,6 @@ const handleRetryConnect = () => {
   reconnectMaxAttempts.value = 0
   reconnectDelay.value = 0
   wsClient.connect()
-}
-
-const clampFocusActionsPosition = (x: number, y: number) => {
-  const panelWidth = Math.max(
-    120,
-    Math.ceil(focusActionsRef.value?.getBoundingClientRect().width ?? (focusActionsCollapsed.value ? 130 : 360)),
-  )
-  const panelHeight = Math.max(40, Math.ceil(focusActionsRef.value?.getBoundingClientRect().height ?? 48))
-  const minX = 8
-  const minY = 8
-  const maxX = Math.max(minX, window.innerWidth - panelWidth - 8)
-  const maxY = Math.max(minY, window.innerHeight - panelHeight - 8)
-  return {
-    x: Math.min(maxX, Math.max(minX, x)),
-    y: Math.min(maxY, Math.max(minY, y)),
-  }
-}
-
-const placeFocusActionsToRight = () => {
-  const panelWidth = Math.max(
-    120,
-    Math.ceil(focusActionsRef.value?.getBoundingClientRect().width ?? (focusActionsCollapsed.value ? 130 : 360)),
-  )
-  const next = clampFocusActionsPosition(window.innerWidth - panelWidth - 16, 68)
-  focusActionsPos.value = next
-}
-
-const handleFocusActionsDragMove = (event: MouseEvent) => {
-  if (!focusActionsDragging.value) {
-    return
-  }
-  const next = clampFocusActionsPosition(
-    event.clientX - focusActionsDragOffset.value.x,
-    event.clientY - focusActionsDragOffset.value.y,
-  )
-  focusActionsPos.value = next
-}
-
-const stopFocusActionsDrag = () => {
-  if (!focusActionsDragging.value) {
-    return
-  }
-  focusActionsDragging.value = false
-  window.removeEventListener('mousemove', handleFocusActionsDragMove)
-  window.removeEventListener('mouseup', stopFocusActionsDrag)
-}
-
-const startFocusActionsDrag = (event: MouseEvent) => {
-  focusActionsDragging.value = true
-  focusActionsDragOffset.value = {
-    x: event.clientX - focusActionsPos.value.x,
-    y: event.clientY - focusActionsPos.value.y,
-  }
-  window.addEventListener('mousemove', handleFocusActionsDragMove)
-  window.addEventListener('mouseup', stopFocusActionsDrag)
 }
 
 watch(
@@ -7044,6 +4728,7 @@ watch(
   { immediate: true },
 )
 
+// 选中态变化时向协作者广播，确保远端标签实时更新。
 watch(
   () => [selectedObjectKey.value, [...selectedObjectKeys.value].sort().join('|'), wsConnected.value, joined.value, sessionKey.value],
   () => {
@@ -7108,6 +4793,7 @@ watch(
   },
 )
 
+// 切只读后立即终止所有正在进行的编辑交互，防止越权写操作。
 watch(
   () => isReadOnly.value,
   (readonly) => {
@@ -7189,6 +4875,7 @@ watch(
   { deep: true },
 )
 
+// 生命周期：挂载后完成入会、画布初始化、同步回放、首次渲染。
 onMounted(async () => {
   loadOrCreateClientId()
   loadCanvasBackgroundColor()
@@ -7207,6 +4894,7 @@ onMounted(async () => {
   scheduleRender()
 })
 
+// 生命周期：卸载时清理计时器、监听器、WS 连接与画布资源。
 onBeforeUnmount(() => {
   if (styleCommitTimer.value !== null) {
     window.clearTimeout(styleCommitTimer.value)
@@ -7215,14 +4903,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   clearHeartbeat()
+  clearMembersRefreshTimer()
   clearRenderFrame()
   teardownResizeObserver()
   stopFocusActionsDrag()
-
-  if (membersRefreshTimer !== null) {
-    window.clearTimeout(membersRefreshTimer)
-    membersRefreshTimer = null
-  }
   if (focusHighlightTimer !== null) {
     window.clearTimeout(focusHighlightTimer)
     focusHighlightTimer = null
@@ -7233,9 +4917,7 @@ onBeforeUnmount(() => {
     wsClient.disconnect()
     wsClient = null
   }
-  imageObjectUrlBySource.forEach((url) => URL.revokeObjectURL(url))
-  imageObjectUrlBySource.clear()
-  imageFallbackLoading.clear()
+  disposeImageResources()
   canvasStore.clearSession()
 })
 </script>

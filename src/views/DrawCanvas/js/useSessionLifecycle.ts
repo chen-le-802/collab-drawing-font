@@ -1,6 +1,8 @@
 import { sessionApi } from '@/api/session'
 import type { SessionDetailVO } from '@/types/session'
 
+// 会话生命周期模块：
+// 处理心跳保活、页面可见性切换、成员列表刷新调度等“会话运行态”能力。
 type UseSessionLifecycleOptions = {
   getSessionKey: () => string
   getJoined: () => boolean
@@ -35,7 +37,7 @@ export const useSessionLifecycle = (options: UseSessionLifecycleOptions) => {
     try {
       await sessionApi.heartbeat(sessionKey)
     } catch {
-      // ignore heartbeat error
+      // 忽略心跳异常，避免临时网络波动打断交互。
     }
   }
 
@@ -50,6 +52,7 @@ export const useSessionLifecycle = (options: UseSessionLifecycleOptions) => {
   }
 
   const onVisibilityChange = () => {
+    // 页面回到前台时，若 WS 已断开则尝试重连，并恢复心跳。
     if (document.visibilityState === 'visible') {
       if (options.getJoined() && !options.isWsConnected()) {
         options.reconnectWs()
@@ -67,6 +70,7 @@ export const useSessionLifecycle = (options: UseSessionLifecycleOptions) => {
       return
     }
     const requestId = ++membersRefreshRequestId
+    // requestId 防抖：只接收最后一次请求结果，避免旧响应覆盖新状态。
     options.setLoadingMembers(true)
     try {
       const detail = await sessionApi.getDetail(sessionKey, options.getIncludeHistoryMembers())

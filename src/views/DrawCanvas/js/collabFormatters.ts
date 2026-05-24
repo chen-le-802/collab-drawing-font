@@ -1,5 +1,7 @@
 import type { CollaborationConflictType, SessionConflictLogItemVO, SessionOperationItemVO, SessionOperationType } from '@/types/session'
 
+// 协作日志/冲突日志文案格式化模块：
+// 负责把后端技术字段转成人类可读描述，供时间线和冲突面板复用。
 const FIELD_NAME_MAP: Record<string, string> = {
   positionX: 'X 坐标',
   positionY: 'Y 坐标',
@@ -59,6 +61,7 @@ export const formatSessionOperationTypeLabel = (operationType: SessionOperationT
   return '删除图元'
 }
 
+// 图元类型显示文案（用于日志摘要）。
 export const formatGraphicTypeLabel = (value: unknown): string => {
   if (value === 'rect') {
     return '矩形'
@@ -114,6 +117,7 @@ export const formatResolveReasonLabel = (reason: unknown): string => {
   return '-'
 }
 
+// 从 resolvedResult 中提取“采用字段/拒绝字段”列表。
 export const getResolvedFieldList = (item: SessionOperationItemVO, key: 'appliedFields' | 'rejectedFields'): string[] => {
   if (!isRecord(item.resolvedResult)) {
     return []
@@ -125,6 +129,7 @@ export const getResolvedFieldList = (item: SessionOperationItemVO, key: 'applied
   return raw.filter((field): field is string => typeof field === 'string' && field.trim().length > 0)
 }
 
+// 时间线主摘要（谁做了什么）。
 export const formatTimelineActivitySummary = (item: SessionOperationItemVO, actor: string): string => {
   const appliedFields = getResolvedFieldList(item, 'appliedFields')
   const restorePrefix = isRestoreOperation(item) ? '【恢复】' : ''
@@ -148,6 +153,7 @@ export const formatTimelineActivitySummary = (item: SessionOperationItemVO, acto
   return `${restorePrefix}${actor} 更新了图元`
 }
 
+// 时间线冲突提示（发生了什么冲突，系统如何处理）。
 export const formatTimelineConflictHint = (item: SessionOperationItemVO): string => {
   if (item.conflictType === 'none') {
     return '已同步完成，未发生冲突。'
@@ -204,6 +210,7 @@ export const formatConflictResolveStrategyLabel = (strategy: string): string => 
   return strategy || '-'
 }
 
+// 冲突日志摘要（用于快速浏览列表）。
 export const formatConflictLogSummary = (item: SessionConflictLogItemVO): string => {
   const fieldLabel = formatFieldNameLabel(item.fieldName || '-')
   if (item.conflictType === 'field_merge') {

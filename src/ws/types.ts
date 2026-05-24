@@ -1,6 +1,9 @@
 import type { GraphicVO } from '@/types/graphic'
 import type { MemberVO } from '@/types/session'
 
+// 客户端 -> 服务端消息类型。
+// 覆盖会话加入离开、图元增改删、撤销重做、协作态（光标/选中）和心跳。
+// 作用：防止消息名乱写，前后端统一词典。
 export type ClientMessageType =
   | 'join_session'
   | 'leave_session'
@@ -13,6 +16,7 @@ export type ClientMessageType =
   | 'selection_change'
   | 'ping'
 
+// 客户端发送消息统一包结构。
 export interface BaseClientMessage<T = unknown> {
   type: ClientMessageType
   data: T
@@ -27,8 +31,11 @@ export interface LeaveSessionData {
   sessionKey: string
 }
 
+//协作元信息：operationId/baseVersion/lamportTime/clientId/batch*
+//定义图元增加的业务载荷字段
 export interface CreateGraphicData {
   sessionKey: string
+  // 协作元信息：用于幂等、因果排序、冲突裁决和批量聚合。
   operationId?: string
   clientId?: string
   baseVersion?: number
@@ -55,8 +62,10 @@ export interface CreateGraphicData {
   rotation?: number
 }
 
+//定义图元更改的业务载荷字段
 export interface UpdateGraphicData {
   sessionKey: string
+  // 协作元信息：用于幂等、因果排序、冲突裁决和批量聚合。
   operationId?: string
   clientId?: string
   baseVersion?: number
@@ -66,6 +75,7 @@ export interface UpdateGraphicData {
   batchSize?: number
   batchLabel?: string
   objectKey: string
+  // 推荐使用 patch 提交变更字段；后面的同名扁平字段用于兼容旧形态。
   patch?: {
     positionX?: number
     positionY?: number
@@ -98,8 +108,10 @@ export interface UpdateGraphicData {
   rotation?: number
 }
 
+//定义图元删除的业务载荷字段
 export interface DeleteGraphicData {
   sessionKey: string
+  // 协作元信息：用于幂等、因果排序、冲突裁决和批量聚合。
   operationId?: string
   clientId?: string
   baseVersion?: number
@@ -110,9 +122,10 @@ export interface DeleteGraphicData {
   batchLabel?: string
   objectKey: string
 }
-
+//定义撤销重做消息（也带协作元字段）
 export interface UndoRedoData {
   sessionKey: string
+  // 协作元信息：用于幂等、因果排序和撤销链对齐。
   operationId?: string
   clientId?: string
   baseVersion?: number
@@ -128,10 +141,12 @@ export interface CursorMoveData {
 
 export interface SelectionChangeData {
   sessionKey: string
+  // objectKey 为单选，objectKeys 为多选。两者按业务场景可同时或单独出现。
   objectKey?: string | null
   objectKeys?: string[]
 }
 
+// 服务端 -> 客户端消息类型。
 export type ServerMessageType =
   | 'session_joined'
   | 'session_left'
@@ -150,12 +165,15 @@ export type ServerMessageType =
   | 'error'
   | 'pong'
 
+// 服务端消息统一包结构。
 export interface ServerMessage<T = unknown> {
   type: ServerMessageType
   data: T
   timestamp: number
 }
 
+//会话加入成功后的初始化数据（成员、图元快照、当前版本）。
+//作用：新连接快速同步到当前画布状态。
 export interface SessionJoinedData {
   sessionKey: string
   sessionId: number
@@ -224,15 +242,18 @@ export interface PresenceSelectionData {
   sessionKey: string
   userId: number
   username: string
+  // objectKey 为主选中对象，objectKeys 为多选全集。
   objectKey: string | null
   objectKeys: string[]
 }
 
+//后端冲突裁决结果：conflictType/appliedFields/rejectedFields/resolveReason
 export interface OperationResolvedData {
   operationId: string
   objectKey: string
   operationType: OperationType
   serverVersion: number
+  // 冲突类型由后端统一裁决，前端据此提示用户并记录日志。
   conflictType: 'none' | 'field_merge' | 'field_conflict' | 'delete_wins' | 'duplicate_operation'
   appliedFields: string[]
   rejectedFields: string[]
@@ -254,6 +275,7 @@ export interface OperationVO {
 
 export interface UndoResultData {
   sessionKey: string
+  // success 缺省时按成功处理，兼容部分历史消息形态。
   success?: boolean
   operation?: OperationVO
   operations?: OperationVO[]
@@ -266,6 +288,7 @@ export interface UndoResultData {
 
 export interface RedoResultData {
   sessionKey: string
+  // success 缺省时按成功处理，兼容部分历史消息形态。
   success?: boolean
   operation?: OperationVO
   operations?: OperationVO[]
@@ -286,6 +309,7 @@ export interface PongData {
   timestamp?: number
 }
 
+// 服务端消息类型 -> 具体 data 类型映射。
 export type ServerMessageDataMap = {
   session_joined: SessionJoinedData
   session_left: SessionLeftData
@@ -305,6 +329,7 @@ export type ServerMessageDataMap = {
   pong: PongData
 }
 
+// 客户端连接生命周期事件（非服务端业务消息）。
 export type ClientLifecycleEventType =
   | 'connected'
   | 'disconnected'
@@ -341,8 +366,10 @@ export type ClientLifecycleEventDataMap = {
   reconnect_failed: ReconnectFailedEventData
 }
 
+// 对外可订阅事件 = 服务端业务消息 + 客户端连接生命周期事件。
 export type WebSocketClientEventType = ServerMessageType | ClientLifecycleEventType
 
+// 对外事件类型 -> data 类型映射。
 export type WebSocketClientEventDataMap = ServerMessageDataMap & ClientLifecycleEventDataMap
 
 // 文档形态：data = { sessionKey, userId, graphic, currentVersion }。
@@ -386,6 +413,8 @@ export interface RawMemberEventData {
   onlineStatus?: number
 }
 
+// 以下 Raw* 类型用于“协议兼容层”：
+// 后端/文档/历史实现可能存在字段差异，client.ts 会先做归一化再抛出强类型事件。
 export interface RawSessionPausedData {
   sessionKey?: string
   isPaused?: boolean

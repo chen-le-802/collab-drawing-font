@@ -22,6 +22,9 @@ import type {
   WsErrorData,
 } from '@/ws/types'
 
+// WS 协作绑定模块：
+// 负责把 WebSocketClient 事件绑定到页面状态更新与业务回调，
+// 同时维护连接状态、重连提示与最近同步时间。
 type UseCollabSyncOptions = {
   wsConnected: Ref<boolean>
   reconnecting: Ref<boolean>
@@ -52,6 +55,7 @@ type UseCollabSyncOptions = {
 const nowTimeText = () => new Date().toLocaleTimeString('zh-CN', { hour12: false })
 
 export const useCollabSync = (options: UseCollabSyncOptions) => {
+  // 连接建立：重置重连状态，必要时触发断线期间回放。
   const handleWsConnected = (payload: ConnectedEventData) => {
     options.wsConnected.value = true
     options.reconnecting.value = false
@@ -70,6 +74,7 @@ export const useCollabSync = (options: UseCollabSyncOptions) => {
     options.wsConnected.value = false
   }
 
+  // 重连中：更新提示条中的次数与延迟。
   const handleWsReconnecting = (payload: ReconnectingEventData) => {
     options.reconnecting.value = true
     options.reconnectFailed.value = false
@@ -78,6 +83,7 @@ export const useCollabSync = (options: UseCollabSyncOptions) => {
     options.reconnectDelay.value = payload.delay
   }
 
+  // 重连失败：切换失败态，允许用户手动重试。
   const handleWsReconnectFailed = (payload: ReconnectFailedEventData) => {
     options.reconnecting.value = false
     options.reconnectFailed.value = true
@@ -85,12 +91,14 @@ export const useCollabSync = (options: UseCollabSyncOptions) => {
     options.reconnectMaxAttempts.value = payload.maxAttempts
   }
 
+  // 仅对关键错误码给用户提示，减少噪音。
   const handleWsError = (payload: WsErrorData) => {
     if (payload.code >= 3000 || payload.code === 2001 || payload.code === 2002) {
       options.onErrorMessage(payload.message || 'WebSocket 出错')
     }
   }
 
+  // 统一事件绑定入口。
   const bindWs = (client: WebSocketClient) => {
     client.on('connected', handleWsConnected)
     client.on('disconnected', handleWsDisconnected)
@@ -113,6 +121,7 @@ export const useCollabSync = (options: UseCollabSyncOptions) => {
     client.on('redo_result', options.onRedoResult)
   }
 
+  // 与 bindWs 成对的解绑入口，避免重复绑定和内存泄漏。
   const unbindWs = (client: WebSocketClient) => {
     client.off('connected', handleWsConnected)
     client.off('disconnected', handleWsDisconnected)
@@ -135,6 +144,7 @@ export const useCollabSync = (options: UseCollabSyncOptions) => {
     client.off('redo_result', options.onRedoResult)
   }
 
+  // 手动重试连接（通常由 UI 的“重试”按钮触发）。
   const handleRetryConnect = (client: WebSocketClient | null) => {
     if (!client) {
       return
