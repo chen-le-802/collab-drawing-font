@@ -86,6 +86,7 @@ import type {
   ReconnectingEventData,
   SessionJoinedData,
   SessionLeftData,
+  SessionRestoredData,
   SessionPausedData,
   WsErrorData,
 } from '@/ws/types'
@@ -2687,6 +2688,18 @@ const handleSessionPaused = (payload: SessionPausedData) => {
   scheduleRender()
 }
 
+// 他人恢复快照后：当前端主动做一次全量补偿同步，保证画布实时与服务端一致。
+const handleSessionRestored = (payload: SessionRestoredData) => {
+  if (payload.sessionKey !== sessionKey.value) {
+    return
+  }
+  const operator = payload.operatorUsername || `用户#${payload.operatorUserId}`
+  feedback.info(
+    `${operator}恢复到版本 V${payload.targetVersion}（当前 V${payload.restoredVersion}）`,
+  )
+  void syncGraphicsFromServer(true)
+}
+
 const handleWsUndoResult = (data: import('@/ws/types').UndoResultData) => {
   canvasStore.handleUndoResult(data)
   if (data.success !== false) {
@@ -2856,6 +2869,7 @@ const bindWs = (client: WebSocketClient) => {
   client.on('member_left', handleWsMemberLeft)
   client.on('member_status_changed', handleMemberStatusChanged)
   client.on('presence_selection', handlePresenceSelection)
+  client.on('session_restored', handleSessionRestored)
   client.on('session_paused', handleSessionPaused)
   client.on('graphic_created', handleGraphicCreated)
   client.on('graphic_updated', handleGraphicUpdated)
@@ -2877,6 +2891,7 @@ const unbindWs = (client: WebSocketClient) => {
   client.off('member_left', handleWsMemberLeft)
   client.off('member_status_changed', handleMemberStatusChanged)
   client.off('presence_selection', handlePresenceSelection)
+  client.off('session_restored', handleSessionRestored)
   client.off('session_paused', handleSessionPaused)
   client.off('graphic_created', handleGraphicCreated)
   client.off('graphic_updated', handleGraphicUpdated)

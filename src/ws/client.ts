@@ -24,6 +24,7 @@ import {
   type RawPresenceSelectionData,
   type ReconnectFailedEventData,
   type ReconnectingEventData,
+  type SessionRestoredData,
   type SessionPausedData,
   type SelectionChangeData,
   type ServerMessage,
@@ -52,6 +53,7 @@ const HEARTBEAT_INTERVAL = 20000
 const SERVER_MESSAGE_TYPES: ReadonlySet<ServerMessageType> = new Set([
   'session_joined',
   'session_left',
+  'session_restored',
   'session_paused',
   'member_joined',
   'member_left',
@@ -486,6 +488,8 @@ export class WebSocketClient {
         return this.normalizeSessionJoined(data) as ServerMessageDataMap[K]
       case 'session_left':
         return this.normalizeSessionLeft(data) as ServerMessageDataMap[K]
+      case 'session_restored':
+        return this.normalizeSessionRestored(data) as ServerMessageDataMap[K]
       case 'session_paused':
         return this.normalizeSessionPaused(data) as ServerMessageDataMap[K]
       case 'member_joined':
@@ -549,6 +553,21 @@ export class WebSocketClient {
       isPaused: record.isPaused === true,
       operatorUserId: typeof record.operatorUserId === 'number' ? record.operatorUserId : undefined,
       operatorUsername: typeof record.operatorUsername === 'string' ? record.operatorUsername : undefined,
+    }
+  }
+
+  // session_restored：恢复快照完成事件。
+  private normalizeSessionRestored(data: unknown): SessionRestoredData {
+    const record = isObject(data) ? data : {}
+    return {
+      sessionKey: toString(record.sessionKey, this.sessionKey),
+      targetVersion: toNumber(record.targetVersion),
+      restoredVersion: toNumber(record.restoredVersion),
+      operatorUserId: toNumber(record.operatorUserId),
+      operatorUsername: toString(record.operatorUsername),
+      createdCount: toNumber(record.createdCount),
+      updatedCount: toNumber(record.updatedCount),
+      deletedCount: toNumber(record.deletedCount),
     }
   }
 

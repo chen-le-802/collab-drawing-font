@@ -150,6 +150,7 @@ export interface SelectionChangeData {
 export type ServerMessageType =
   | 'session_joined'
   | 'session_left'
+  | 'session_restored'
   | 'session_paused'
   | 'member_joined'
   | 'member_left'
@@ -192,6 +193,17 @@ export interface SessionPausedData {
   isPaused: boolean
   operatorUserId?: number
   operatorUsername?: string
+}
+
+export interface SessionRestoredData {
+  sessionKey: string
+  targetVersion: number
+  restoredVersion: number
+  operatorUserId: number
+  operatorUsername: string
+  createdCount: number
+  updatedCount: number
+  deletedCount: number
 }
 
 export interface MemberJoinedData {
@@ -313,6 +325,7 @@ export interface PongData {
 export type ServerMessageDataMap = {
   session_joined: SessionJoinedData
   session_left: SessionLeftData
+  session_restored: SessionRestoredData
   session_paused: SessionPausedData
   member_joined: MemberJoinedData
   member_left: MemberJoinedData
